@@ -1,128 +1,159 @@
-import MatrixAppServiceBridge = require('matrix-appservice-bridge');
-const { AppServiceRegistration, Cli } = MatrixAppServiceBridge;
+import { AppServiceRegistration, Cli, Bridge, Base, ThirdPartyAdapter } from 'matrix-appservice-bridge';
 
-const Promise = require('bluebird');
-import { Base } from './base';
-import { ThirdPartyAdapter } from './third-party-adapter';
-import { Puppet, PuppetConfigLoadParams } from './puppet';
-import { Bridge } from 'matrix-appservice-bridge';
+import { Puppet } from './puppet';
+import { Config, Deduplication, IdentityPair, User } from './config';
+import { BridgeController } from './bridge';
+import * as fs  from 'async-file';
+import * as npm from 'npm';
 
-import { Config, IdentityPair} from './config';
-import { createBridge, BridgeController, ThirdPartyLookup } from './bridge-setup';
+import * as tc from 'typed-promisify';
 
-export interface AppParams {
-  configPath : string;
-  createAdapter(identityPair : IdentityPair, baseInstance: Base) : ThirdPartyAdapter;
-}
+const debug = require('debug')('matrix-puppet:debug');
+const info = require('debug')('matrix-puppet:info');
+const warn = require('debug')('matrix-puppet:warn');
+const error = require('debug')('matrix-puppet:error');
 
 export class App {
   private live : { [id: string]: Base };
   private config : Config;
   private bridge : Bridge;
-
-  constructor(private params: AppParams) {
-    this.config = <Config>(require(params.configPath));
-    this.live = {};
+  private configPath : string;
+  private puppets : Map<string, Puppet> = <Map<string, Puppet>>{};
+  async readConfig(jsonFile: string) : Promise<Config> {
+    const buffer : string = await fs.readFile(jsonFile);
+    return <Config>JSON.parse(buffer);
   }
 
-  start() {
+  async start(configPath: string) {
+    this.configPath = configPath;
+    this.config = await this.readConfig(configPath);
+    this.live = {};
+    
     new Cli({
-      port: this.config.port,
-      registrationPath: this.config.registrationPath,
+      port: this.config.httpserver.port,
+      registrationPath: this.config.homeserver.registration,
       generateRegistration: (reg, callback) => {
         reg.setId(AppServiceRegistration.generateToken());
         reg.setHomeserverToken(AppServiceRegistration.generateToken());
         reg.setAppServiceToken(AppServiceRegistration.generateToken());
-        reg.setSenderLocalpart(`${this.config.servicePrefix}bot`);
-        reg.addRegexPattern("users", `@${this.config.servicePrefix}_.*`, true);
-        reg.addRegexPattern("aliases", `#${this.config.servicePrefix}_.*`, true);
+        reg.setSenderLocalpart('puppetbot');
+        reg.addRegexPattern("users", `^@[a-z]+_puppet_[\w]+_[a-zA-Z0-9+\\/=]+:${this.config.homeserver.domain}$`, true);
+        reg.addRegexPattern("aliases", `^#[a-z]+_puppet_[\w]+_[a-zA-Z0-9+\\/=]+:${this.config.homeserver.domain}$`, true);
         callback(reg);
       },
       run: this.run.bind(this)
     }).run();
   }
 
-  private createPrefix(pair : IdentityPair) : string {
-    return `${this.config.servicePrefix}_${pair.id}`;
-  }
-
-  private getIdentityPairId(data : { room_id : string }) : string {
-    const patt = new RegExp(`^#${this.config.servicePrefix}_(.+)_.+$`);
-    console.log('!!!', data.room_id);
-    const room = this.bridge.getIntent().getClient().getRoom(data.room_id);
-    console.log(room);
-    return room.getAliases().reduce((result, alias) => {
-      const localpart = alias.replace(':'+this.config.homeserverDomain, '');
-      const matches = localpart.match(patt);
-      console.log(localpart, matches);
-      return matches ? matches[1] : result;
-    }, null);
-  }
-
-  private run(port) : Promise<void> {
-
-
-    this.bridge = createBridge(this.config, <BridgeController>{
-      onUserQuery: function(queriedUser) {
-        return {}; // auto provision users with no additional data
-      },
-      onEvent: (req, context) => {
-        //const { room_id } = (<any>req).getData();
-        //let identPairId = this.getIdentityPairId({ room_id });
-        //console.log('IDENTTITY PAIR ID', identPairId);
-
-        Object.keys(this.live).forEach(id=>{
-          this.live[id].handleMatrixEvent(req, context);
-        });
-
-        // look in live for the thing based on param and call handleMatrixEvent
-        // use the bot to find out the alias 
-
-      },
-      onAliasQuery: function() {},
-      thirdPartyLookup: <ThirdPartyLookup>{
-        protocols: this.config.identityPairs.map((pair) => this.createPrefix(pair)),
-        getProtocol: function() {},
-        getLocation: function() {},
-        getUser: function() {},
-      }
+  private async loadNpm() : Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      npm.load((err) => {
+        if (err) {
+          return reject(err);
+        }
+        return resolve();
+      });
     });
+  }
 
-    return Promise.map(this.config.identityPairs, (pair : IdentityPair)=>{
-      const puppetParams : PuppetConfigLoadParams = {
-        config: this.config,
-        jsonFile: this.params.configPath
+  private async installNpmPackage(pkg: string) : Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      npm.commands.install([pkg], (err, data) => {
+        if (err) {
+          npm.commands.link([pkg], (err, data) => {
+            if (err) {
+              return reject(err);
+            }
+            npm.commands.install([pkg], (err, data) => {
+              if (err) {
+                return reject(err);
+              }
+              return resolve(data);
+            });
+          });
+        }
+        return resolve(data);
+      });
+    });
+  }
+
+  private bridgeController: BridgeController = {
+    onUserQuery(user) {
+      return {}; // auto provision users with no additional data
+    },
+    onEvent(req, context) {
+      console.log('New event!');
+      console.log(req, context);
+      for (let p in this.puppets) {
+        this.puppets[p].handleMatrixEvent(req, context);
       }
-      const puppet = new Puppet(pair.id, puppetParams);
-      const instance = new Base(<Config>{
-        ...this.config,
-        servicePrefix: this.createPrefix(pair)
-      }, puppet, this.bridge);
-      const adapter = this.params.createAdapter(pair, instance);
-      instance.setAdapter(adapter);
-      this.live[pair.id] = instance;
-      return puppet.startClient(this.config).catch((err)=>{
-        console.error("Fatal error starting matrix client for identity", pair.id);
-        console.error(err);
+    },
+    onAliasQuery() {
+      
+    }
+  }
+
+  private async run(port) : Promise<void> {
+    let users : string[] = []; // this array holds all the usernames of valid people for easy lookup
+    for (let u in this.config.users) {
+      users.push(u);
+    }
+    await this.loadNpm();
+    
+    // first we create the bridge
+    this.bridge = new Bridge({
+      homeserverUrl: this.config.homeserver.url,
+      domain: this.config.homeserver.domain,
+      registration: this.config.homeserver.registration,
+      controller: this.bridgeController
+    });
+    
+    // here we load all the puppets (don't start them yet, though)
+    for (let u in this.config.users) {
+      this.puppets[u] = new Puppet(u, this.config.users[u], this.config.homeserver);
+    }
+    
+    // let's loop through all the networks
+    for (let network in this.config.networks) {
+      debug("Found network " + network);
+      let net;
+      // if we can't import the network then we'll try to install it!
+      try {
+        net = require('matrix-puppet-'+network);
+      } catch (e) {
+        await this.installNpmPackage('matrix-puppet-'+network);
+        net = require('matrix-puppet-'+network);
+      }
+      if (!net.Adapter) { // uho, this is actually just some random thing...
+        error("Network " + network + " doesn't export the 'Adapter' class!");
         process.exit(-1);
-      }).then(()=>{
-        return adapter.startClient().catch((err)=>{
-          console.error("Fatal error starting third party client for identity", pair.id);
-          console.error(err);
-          process.exit(-1);
-        });
-      })
-    }).then(() => {
-      return this.bridge.run(port, this.config);
-    }).then(()=>{
-      console.log('Matrix-side listening on port %s', port);
-    }).catch(err=>{
-      if ( err && err.stack ) {
-        console.error(err.stack);
-      } else {
-        console.error("Fatal error", err);
       }
-      process.exit(-1);
-    });
+      
+      // okay let's loop through all identity pairs of this network and add them to the puppet
+      let dedupe: Deduplication = this.config.networks[network].deduplication;
+      for (let identId in this.config.networks[network].identityPairs) {
+        let ident: IdentityPair = <IdentityPair>{
+          id: identId,
+          ...this.config.networks[network].identityPairs[identId]
+        };
+        if (!this.puppets[ident.matrixPuppet]) {
+          error("Unkown matrix puppet " + ident.matrixPuppet);
+          process.exit(-1);
+        }
+        this.puppets[ident.matrixPuppet].addAdapter(net.Adapter, ident, network, dedupe, this.bridge);
+        debug(ident);
+      }
+      debug("Loaded network " + network);
+    }
+    
+    this.bridge.run(this.config.httpserver.port); // start the HTTP bridge
+    
+    // and now let's trigger the puppets to connect!
+    for (let p in this.puppets) {
+      let puppet = this.puppets[p];
+      puppet.startClient(this.configPath).then(() => {
+        puppet.startAdapters();
+      });
+    }
   }
 }

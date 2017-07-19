@@ -2,3 +2,6 @@ node_modules
 dist
 typings
 package-lock.json
+config.json
+registration.yaml
+*.db

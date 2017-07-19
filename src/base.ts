@@ -1,34 +1,36 @@
 const info = require('debug')('matrix-puppet:info');
 const warn = require('debug')('matrix-puppet:warn');
 const error = require('debug')('matrix-puppet:error');
-const Promise = require('bluebird');
 import { Bridge, RemoteUser } from 'matrix-appservice-bridge';
-import { BangCommand, parseBangCommand } from './bang-command';
-const urlParse = require('url').parse;
-const inspect = require('util').inspect;
-const path = require('path');
-import { download, localdisk, autoTagger, isFilenameTagged, createUploader } from './utils';
-const fs = require('fs');
+import { parse as urlParse} from 'url';
+import { inspect } from 'util';
+import * as path from 'path';
+import { autoTagger, createUploader } from './utils';
+import * as fs from 'async-file';
 
 import { Puppet } from './puppet';
-import { Config } from './config';
-import { createBridge, BridgeController, ThirdPartyLookup } from './bridge-setup';
+import { Deduplication, IdentityPair } from './config';
+import { BridgeController, ThirdPartyLookup } from './bridge';
 import { Intent } from './intent';
 import { MatrixClient } from './matrix-client';
+import * as tc from 'typed-promisify';
 
 import {
+  BangCommand, parseBangCommand,
+  
   ThirdPartyAdapter,
   ThirdPartyMessagePayload,
   ThirdPartyImageMessagePayload,
-  ContactListUserData
-} from './third-party-adapter';
-
-import {
+  ContactListUserData,
+  
+  download, localdisk, isFilenameTagged,
+  
   BaseInterface,
-  StatusMessageOptions
-} from './base-interface';
+  StatusMessageOptions,
+  
+  Image
+} from 'matrix-puppet-bridge';
 
-import { Image } from './image';
 
 interface PrepareMessageHandlerParams {
   senderId: string;
@@ -45,53 +47,51 @@ interface MessageHandler {
   ignore?: boolean;
 }
 
+const a2b = a => new Buffer(a).toString('base64');
+const b2a = b => new Buffer(b, 'base64').toString('ascii');
+
 export class Base implements BaseInterface {
   public adapter: ThirdPartyAdapter;
+  public bridge: Bridge;
+  private identityPair: IdentityPair;
+  private puppet: Puppet;
   private deduplicationTag: string;
   private deduplicationTagPattern: string;
   private deduplicationTagRegex: RegExp;
+  private network: string;
+  private thirdPartyRooms: Map<string, string>;
 
-  constructor(private config: Config, private puppet: Puppet, public bridge?:Bridge) {
-    this.config = config;
-    if (!this.config.statusRoomPostfix) {
-      this.config.statusRoomPostfix = "puppetStatusRoom";
-    }
+  constructor(identityPair: IdentityPair, network: string, puppet: Puppet, bridge: Bridge, dedupe?: Deduplication) {
+    this.identityPair = identityPair;
     this.puppet = puppet;
-    this.deduplicationTag = this.config.deduplicationTag || this.defaultDeduplicationTag();
-    this.deduplicationTagPattern = this.config.deduplicationTagPattern || this.defaultDeduplicationTagPattern();
+    this.network = network;
+    
+    this.deduplicationTag = (dedupe && dedupe.tag) || this.defaultDeduplicationTag();
+    this.deduplicationTagPattern = (dedupe && dedupe.pattern) || this.defaultDeduplicationTagPattern();
     this.deduplicationTagRegex = new RegExp(this.deduplicationTagPattern);
-    if (bridge) {
-      this.bridge = bridge;
-    } else {
-      this.bridge = createBridge(config, <BridgeController>{
-        onUserQuery: function(queriedUser) {
-          info('got user query', queriedUser);
-          return {}; // auto provision users w no additional data
-        },
-        onEvent: this.handleMatrixEvent,
-        onAliasQuery: function() {
-          info('on alias query');
-        },
-        thirdPartyLookup: <ThirdPartyLookup>{
-          protocols: [config.servicePrefix],
-          getProtocol: function() {
-            info('get proto');
-          },
-          getLocation: function() {
-            info('get loc');
-          },
-          getUser: function() {
-            info('get user');
-          }
-        }
-      });
-    }
-    info('initialized');
+    
+    this.bridge = bridge;
+    info('initialized bridge');
   }
 
   public setAdapter(adapter: ThirdPartyAdapter) {
     this.adapter = adapter;
-    this.puppet.setAdapter(adapter)
+  }
+
+  public startClient() {
+    let promise;
+    if (this.adapter.initClient) {
+      promise = this.adapter.initClient().then(() => {
+        this.adapter.startClient();
+      });
+    } else {
+      promise = this.adapter.startClient();
+    }
+    return promise.catch((err) => {
+      console.log("Fatal error starting third party adapter");
+      console.error(err);
+      process.exit(-1);
+    });
   }
 
   /**
@@ -101,8 +101,8 @@ export class Base implements BaseInterface {
    * @returns {Promise} Promise resolving the Matrix room ID of the status room
    */
   private getStatusRoomId(_roomAliasLocalPart?:string) {
-    const roomAliasLocalPart = _roomAliasLocalPart || this.config.servicePrefix+"_"+this.config.statusRoomPostfix;
-    const roomAlias = "#"+roomAliasLocalPart+":"+this.config.homeserverDomain;
+    const roomAliasLocalPart = _roomAliasLocalPart || this.getRoomAliasLocalPartFromThirdPartyRoomId("status_room");
+    const roomAlias = this.puppet.makeRoomAlias(roomAliasLocalPart);
     const puppetClient = this.puppet.getClient();
 
     const botIntent = this.getIntentFromApplicationServerBot();
@@ -127,8 +127,8 @@ export class Base implements BaseInterface {
       info("found matrix room via alias. room_id:", room_id);
       return grantPuppetMaxPowerLevel(room_id);
     }, (_err) => {
-      const name = this.config.serviceName + " Protocol";
-      const topic = this.config.serviceName + " Protocol Status Messages";
+      const name = this.adapter.serviceName + " Protocol";
+      const topic = this.adapter.serviceName + " Protocol Status Messages";
       info("creating status room !!!!", ">>>>"+roomAliasLocalPart+"<<<<", name, topic);
       return botIntent.createRoom({
         createAsClient: false,
@@ -137,8 +137,8 @@ export class Base implements BaseInterface {
         }
       }).then(({room_id}) => {
         info("status room created", room_id, roomAliasLocalPart);
-        if (this.config.serviceIconPath) {
-          return this.setRoomAvatarFromDisk(room_id, this.config.serviceIconPath).then(()=>room_id);
+        if (this.adapter.serviceIconPath) {
+          return this.setRoomAvatarFromDisk(room_id, this.adapter.serviceIconPath).then(()=>room_id);
         }
         return room_id;
       });
@@ -175,8 +175,8 @@ export class Base implements BaseInterface {
   public joinThirdPartyUsersToStatusRoom(users: Array<ContactListUserData>) {
     info("Join %s users to the status room", users.length);
     return this.getStatusRoomId().then(statusRoomId => {
-      return Promise.each(users, (user) => {
-        return this.getIntentFromThirdPartySenderId(user.userId, user.name, user.avatarUrl)
+      return tc.map(users, (user) => {
+        return this.getIntentFromThirdPartySenderId(a2b(user.userId), user.name, user.avatarUrl)
         .then((ghostIntent) => {
           return ghostIntent.join(statusRoomId);
         });
@@ -235,7 +235,7 @@ export class Base implements BaseInterface {
         let txt = this.tagMatrixMessage(msgText); // <-- Important! Or we will cause message looping...
         if(options.fixedWidthOutput)
         {
-          return botIntent.sendMessage(statusRoomId, {
+          return botIntent.sendMessage(b2a(statusRoomId), {
             body: txt,
             formatted_body: "<pre><code>" + txt + "</code></pre>",
             format: "org.matrix.custom.html",
@@ -244,40 +244,44 @@ export class Base implements BaseInterface {
         }
         else
         {
-          return botIntent.sendMessage(statusRoomId, {
+          return botIntent.sendMessage(b2a(statusRoomId), {
             body: txt,
             msgtype: "m.notice"
           });
         }
       });
 
-      return Promise.mapSeries(promiseList, p => p());
+      return tc.map(promiseList, p => {
+        return p();
+      });
     });
   }
+
   private getGhostUserFromThirdPartySenderId(id) {
-    return "@"+this.config.servicePrefix+"_"+id+":"+this.config.homeserverDomain;
+    return this.puppet.makeUserAlias(this.getRoomAliasLocalPartFromThirdPartyRoomId(id));
   }
+
   private getRoomAliasFromThirdPartyRoomId(id) {
-    return "#"+this.getRoomAliasLocalPartFromThirdPartyRoomId(id)+':'+this.config.homeserverDomain;
-  }
+    return this.puppet.makeRoomAlias(this.getRoomAliasLocalPartFromThirdPartyRoomId(id));
+  }/*
   private getThirdPartyUserIdFromMatrixGhostId(matrixGhostId) {
     const patt = new RegExp(`^@${this.config.servicePrefix}_(.+)$`);
     const localpart = matrixGhostId.replace(':'+this.config.homeserverDomain, '');
     const matches = localpart.match(patt);
     return matches ? matches[1] : null;
-  }
+  }*/
   private getThirdPartyRoomIdFromMatrixRoomId(matrixRoomId) {
-    const patt = new RegExp(`^#${this.config.servicePrefix}_(.+)$`);
+    const patt = new RegExp(`^#${this.network}_puppet_${this.identityPair.id}_([a-zA-Z0-9+\\/=_]+)$`);
     const room = this.puppet.getClient().getRoom(matrixRoomId);
     info('reducing array of alases to a 3prid');
     return room.getAliases().reduce((result, alias) => {
-      const localpart = alias.replace(':'+this.config.homeserverDomain, '');
+      const localpart = alias.split(':')[0];
       const matches = localpart.match(patt);
       return matches ? matches[1] : result;
     }, null);
   }
   private getRoomAliasLocalPartFromThirdPartyRoomId(id) {
-    return this.config.servicePrefix+"_"+id;
+    return this.network+"_puppet_"+this.identityPair.id+"_"+id;
   }
 
   /**
@@ -289,6 +293,7 @@ export class Base implements BaseInterface {
    *
    * @returns {Promise} A promise resolving to an Intent
    */
+
   private getIntentFromThirdPartySenderId(userId: string, name?: string, avatarUrl?: string) : Promise<Intent> {
     const ghostIntent = this.bridge.getIntent(this.getGhostUserFromThirdPartySenderId(userId));
 
@@ -332,6 +337,7 @@ export class Base implements BaseInterface {
    * @param {string} thirdPartyUserId
    * @returns {Promise} A promise resolving to a {RemoteUser}
    */
+
   private getOrInitRemoteUserStoreDataFromThirdPartyUserId(thirdPartyUserId: string) : Promise<RemoteUser> {
     const userStore = this.bridge.getUserStore();
     return userStore.getRemoteUser(thirdPartyUserId).then(rUser=>{
@@ -340,7 +346,7 @@ export class Base implements BaseInterface {
         return rUser;
       } else {
         info("did not find existing remote user in store, we must create it now");
-        return this.adapter.getUserData(thirdPartyUserId).then(thirdPartyUserData => {
+        return this.adapter.getUserData(b2a(thirdPartyUserId)).then(thirdPartyUserData => {
           info("got 3p user data:", thirdPartyUserData);
           return new RemoteUser(thirdPartyUserId, thirdPartyUserData);
         }).then(rUser => {
@@ -380,7 +386,7 @@ export class Base implements BaseInterface {
       return room_id;
     }, (_err) => {
       info("the room doesn't exist. we need to create it for the first time");
-      return Promise.resolve(this.adapter.getRoomData(thirdPartyRoomId)).then(thirdPartyRoomData => {
+      return Promise.resolve(this.adapter.getRoomData(b2a(thirdPartyRoomId))).then(thirdPartyRoomData => {
         info("got 3p room data", thirdPartyRoomData);
         const { name, topic, avatarUrl } = thirdPartyRoomData;
         info("creating room !!!!", ">>>>"+roomAliasName+"<<<<", name, topic);
@@ -421,7 +427,7 @@ export class Base implements BaseInterface {
         }
       });
     }).then(matrixRoomId => {
-      this.puppet.saveThirdPartyRoomId(matrixRoomId, thirdPartyRoomId);
+      this.thirdPartyRooms[matrixRoomId] = thirdPartyRoomId;
       botIntent.leave(matrixRoomId); // workaround because createAsClient doesnt work
       return matrixRoomId;
     });
@@ -458,6 +464,11 @@ export class Base implements BaseInterface {
    */
   public handleThirdPartyRoomImageMessage(thirdPartyRoomImageMessageData: ThirdPartyImageMessagePayload) : Promise<void> {
     info('handling third party room image message', thirdPartyRoomImageMessageData);
+    if (!thirdPartyRoomImageMessageData.senderName) {
+      thirdPartyRoomImageMessageData.senderName = thirdPartyRoomImageMessageData.senderId;
+    }
+    thirdPartyRoomImageMessageData.senderId = a2b(thirdPartyRoomImageMessageData.senderId);
+    thirdPartyRoomImageMessageData.roomId = a2b(thirdPartyRoomImageMessageData.roomId);
     let {
       text, senderId, senderName, avatarUrl, roomId,
       url, path, buffer, // either one is fine
@@ -483,11 +494,9 @@ export class Base implements BaseInterface {
           });
         };
       } else if ( path ) {
-        promise = () => {
-          return Promise.promisify(fs.readFile)(path).then(buffer => {
-            return upload(buffer);
-          });
-        };
+        promise = fs.readFile(path).then(() => {
+          return upload(buffer);
+        });
       } else if ( buffer ) {
         promise = () => upload(buffer);
       } else {
@@ -498,7 +507,7 @@ export class Base implements BaseInterface {
         info('uploaded to', content_uri);
         let msg = tag(text);
         let opts = { mimetype, h, w, size };
-        return client.sendImageMessage(matrixRoomId, content_uri, opts, msg);
+        return client.sendImageMessage(b2a(matrixRoomId), content_uri, opts, msg);
       }, (err) =>{
         warn('upload error', err);
 
@@ -506,7 +515,7 @@ export class Base implements BaseInterface {
           body: tag(url || path || text),
           msgtype: "m.text"
         };
-        return client.sendMessage(matrixRoomId, opts);
+        return client.sendMessage(b2a(matrixRoomId), opts);
       });
     });
   }
@@ -515,6 +524,11 @@ export class Base implements BaseInterface {
    */
   public handleThirdPartyRoomMessage(thirdPartyRoomMessageData : ThirdPartyMessagePayload) : Promise<void> {
     info('handling third party room message', thirdPartyRoomMessageData);
+    if (!thirdPartyRoomMessageData.senderName) {
+      thirdPartyRoomMessageData.senderName = thirdPartyRoomMessageData.senderId;
+    }
+    thirdPartyRoomMessageData.senderId = a2b(thirdPartyRoomMessageData.senderId);
+    thirdPartyRoomMessageData.roomId = a2b(thirdPartyRoomMessageData.roomId);
     const {
       text, senderId, senderName, avatarUrl, roomId,
       html
@@ -526,14 +540,14 @@ export class Base implements BaseInterface {
       if (handler.ignore) return;
       const { tag, matrixRoomId, client } = handler;
       if (html) {
-        return client.sendMessage(matrixRoomId, {
+        return client.sendMessage(b2a(matrixRoomId), {
           body: tag(text),
           formatted_body: html,
           format: "org.matrix.custom.html",
           msgtype: "m.text"
         });
       } else {
-        return client.sendMessage(matrixRoomId, {
+        return client.sendMessage(b2a(matrixRoomId), {
           body: tag(text),
           msgtype: "m.text"
         });
@@ -552,6 +566,7 @@ export class Base implements BaseInterface {
       return warn('ignored a matrix event', data.type);
     }
   }
+
   private handleMatrixMessageEvent(data) {
     const { room_id, content: { body, msgtype } } = data;
 
@@ -563,7 +578,7 @@ export class Base implements BaseInterface {
     }
 
     const thirdPartyRoomId = this.getThirdPartyRoomIdFromMatrixRoomId(room_id);
-    const isStatusRoom = thirdPartyRoomId === this.config.statusRoomPostfix;
+    const isStatusRoom = thirdPartyRoomId === "status_room";
 
     if (!thirdPartyRoomId) {
       promise = () => Promise.reject(new Error('could not determine third party room id!'));
@@ -584,7 +599,7 @@ export class Base implements BaseInterface {
           const bc = parseBangCommand(body);
           if (bc) return this.adapter.handleMatrixUserBangCommand(bc, data);
         }
-        promise = () => this.adapter.sendMessage(thirdPartyRoomId, msg);
+        promise = () => this.adapter.sendMessage(b2a(thirdPartyRoomId), msg);
       } else if (msgtype === 'm.image') {
         info("picture message from riot");
 
@@ -597,7 +612,7 @@ export class Base implements BaseInterface {
             height: data.content.info.h,
             size: data.content.info.size,
           }
-          return this.adapter.sendImageMessage(thirdPartyRoomId, image);
+          return this.adapter.sendImageMessage(b2a(thirdPartyRoomId), image);
         };
       } else {
         let err = 'dont know how to handle this msgtype '+msgtype;
@@ -609,6 +624,7 @@ export class Base implements BaseInterface {
       this.sendStatusMsg({}, err, data);
     });
   }
+
   private defaultDeduplicationTag() {
     return " \ufeff";
   }
@@ -634,6 +650,7 @@ export class Base implements BaseInterface {
    * @param {string} avatarUrl a resource on the public web
    * @returns {Promise}
    */
+
   private setGhostAvatar(ghostIntent, avatarUrl) {
     const client = ghostIntent.getClient();
 
@@ -693,5 +710,11 @@ export class Base implements BaseInterface {
       info('uploaded avatar and got back content uri', contentUri);
       return botIntent.setRoomAvatar(roomId, contentUri);
     });
+  }
+
+  public sendReadReceipt(roomId: string) {
+    if (roomId in this.thirdPartyRooms) {
+      return this.adapter.sendReadReceipt(b2a(this.thirdPartyRooms[roomId]));
+    }
   }
 }

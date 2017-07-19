@@ -16,17 +16,4 @@ export interface BridgeController {
   onUserQuery(user: any): void;
   onEvent(req: object, context: object): void;
   onAliasQuery(): void;
-  thirdPartyLookup: ThirdPartyLookup
-}
-
-/**
- * Instantiates a Bridge for you. Called by the Base constructor if an existing bridge instance was not provided.
- */
-export const createBridge = (config: Config, controller: BridgeController) : Bridge => {
-  return new Bridge({
-    homeserverUrl: config.homeserverUrl,
-    domain: config.homeserverDomain,
-    registration: config.registrationPath,
-    controller
-  });
 }
