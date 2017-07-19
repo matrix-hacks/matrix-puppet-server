@@ -18,7 +18,7 @@ export class App {
   private config : Config;
   private bridge : Bridge;
   private configPath : string;
-  private puppets : Map<string, Puppet> = <Map<string, Puppet>>{};
+  private puppets : Map<string, Puppet> = new Map<string, Puppet>();
   async readConfig(jsonFile: string) : Promise<Config> {
     const buffer : string = await fs.readFile(jsonFile);
     return <Config>JSON.parse(buffer);
@@ -37,8 +37,8 @@ export class App {
         reg.setHomeserverToken(AppServiceRegistration.generateToken());
         reg.setAppServiceToken(AppServiceRegistration.generateToken());
         reg.setSenderLocalpart('puppetbot');
-        reg.addRegexPattern("users", `^@[a-z]+_puppet_[\w]+_[a-zA-Z0-9+\\/=]+:${this.config.homeserver.domain}$`, true);
-        reg.addRegexPattern("aliases", `^#[a-z]+_puppet_[\w]+_[a-zA-Z0-9+\\/=]+:${this.config.homeserver.domain}$`, true);
+        reg.addRegexPattern("users", `^@[a-z]+_puppet_[\\w]+_[a-zA-Z0-9+\\/=]+:${this.config.homeserver.domain}$`, true);
+        reg.addRegexPattern("aliases", `^#[a-z]+_puppet_[\\w]+_[a-zA-Z0-9+\\/=]+:${this.config.homeserver.domain}$`, true);
         callback(reg);
       },
       run: this.run.bind(this)
@@ -77,20 +77,21 @@ export class App {
     });
   }
 
-  private bridgeController: BridgeController = {
-    onUserQuery(user) {
-      return {}; // auto provision users with no additional data
-    },
-    onEvent(req, context) {
-      console.log('New event!');
-      console.log(req, context);
-      for (let p in this.puppets) {
-        this.puppets[p].handleMatrixEvent(req, context);
+  private createBridgeController(): BridgeController {
+    let self = this;
+    return <BridgeController>{
+      onUserQuery(user) {
+        return {}; // auto provision users with no additional data
+      },
+      onEvent(req, context) {
+        for (let p in self.puppets) {
+          self.puppets[p].handleMatrixEvent(req, context);
+        }
+      },
+      onAliasQuery() {
+        
       }
-    },
-    onAliasQuery() {
-      
-    }
+    };
   }
 
   private async run(port) : Promise<void> {
@@ -105,7 +106,7 @@ export class App {
       homeserverUrl: this.config.homeserver.url,
       domain: this.config.homeserver.domain,
       registration: this.config.homeserver.registration,
-      controller: this.bridgeController
+      controller: this.createBridgeController()
     });
     
     // here we load all the puppets (don't start them yet, though)

@@ -1,0 +1,36 @@
+{
+  "httpserver": {
+    "domain": "localhost",
+    "port": 8090
+  },
+  "homeserver": {
+    "domain": "localhost",
+    "url": "http://localhost:8008",
+    "registration": "registration.yaml"
+  },
+  "users": {
+    "sorunome": {
+      "password": "lol"
+    }
+  },
+  "networks": {
+    "skype": {
+      "identityPairs": {
+        "soru": {
+          "matrixPuppet": "sorunome",
+          "thirdParty": {
+            "username": "skype_username",
+            "password": "skype_password"
+          }
+        },
+        "soru2": {
+          "matrixPuppet": "sorunome",
+          "thirdParty": {
+            "username": "skype_second_account",
+            "password": "skype_second_password"
+          }
+        }
+      }
+    }
+  }
+}

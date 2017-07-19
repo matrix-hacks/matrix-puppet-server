@@ -1,4 +1,12 @@
-# matrix-puppet-bridge
+# THIS IS STILL HEAVILY IN DEVELOPMENT, USE AT YOUR OWN RISK
+If you want a currently working version of puppet bridges then head over [here](https://github.com/matrix-hacks/matrix-puppet-bridge)!
+
+## Installation
+* Clone matrix-puppet-bridge, use the development branch and run `npm link`
+* Clone matrix-puppet-skype, use the development branch, run `npm link matrix-puppet-bridge` and then `npm link`
+* Clone this, run `npm link matrix-puppet-bridge`, `npm link matrix-puppet-skype` and then `npm install` and `npm start`.
+
+# matrix-puppet-server
 
 [![Build Status](https://travis-ci.org/matrix-hacks/matrix-puppet-bridge.svg?branch=master)](https://travis-ci.org/matrix-hacks/matrix-puppet-bridge)
 
