@@ -41,5 +41,8 @@ export interface MatrixClient {
   uploadContent(data: Buffer, UploadOptions): Promise<UploadResponse>;
   sendImageMessage(roomId: string, url: string, info: SendImageInfo, text: string) : Promise<void>;
   sendMessage(roomId: string, SendMessageParams): Promise<void>;
+  getAccountData(eventType: string): any;
+  setAccountData(eventType: string, contents: any): Promise<void>;
+  invite(roomId: string, userId: string): Promise<void>;
+  setRoomTag(roomId: string, tagName: string, metadata): Promise<void>;
 }
-

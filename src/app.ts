@@ -37,8 +37,8 @@ export class App {
         reg.setHomeserverToken(AppServiceRegistration.generateToken());
         reg.setAppServiceToken(AppServiceRegistration.generateToken());
         reg.setSenderLocalpart('puppetbot');
-        reg.addRegexPattern("users", `^@[a-z]+_puppet_[\\w]+_[a-zA-Z0-9+\\/=]+:${this.config.homeserver.domain}$`, true);
-        reg.addRegexPattern("aliases", `^#[a-z]+_puppet_[\\w]+_[a-zA-Z0-9+\\/=]+:${this.config.homeserver.domain}$`, true);
+        reg.addRegexPattern("users", `^@[a-z]+_puppet_[\\w]+_[a-zA-Z0-9+\\/=_]+:${this.config.homeserver.domain}$`, true);
+        reg.addRegexPattern("aliases", `^#[a-z]+_puppet_[\\w]+_[a-zA-Z0-9+\\/=_]+:${this.config.homeserver.domain}$`, true);
         callback(reg);
       },
       run: this.run.bind(this)

@@ -96,8 +96,15 @@ export class Base implements BaseInterface {
    * @params {_roomAliasLocalPart} Optional, the room alias local part
    * @returns {Promise} Promise resolving the Matrix room ID of the status room
    */
-  private getStatusRoomId(_roomAliasLocalPart?:string) {
-    const roomAliasLocalPart = _roomAliasLocalPart || this.getRoomAliasLocalPartFromThirdPartyRoomId("status_room");
+  private getStatusRoomLocalpart(): string {
+    return "status_puppet_room__"+a2b(this.puppet.userId)+"_";
+  }
+  private statusRoomId: string = '';
+  private getStatusRoomId(_roomAliasLocalPart = '', force = false) {
+    if (!force && this.statusRoomId) {
+      return Promise.resolve(this.statusRoomId);
+    }
+    const roomAliasLocalPart = _roomAliasLocalPart || this.getStatusRoomLocalpart();
     const roomAlias = this.puppet.makeRoomAlias(roomAliasLocalPart);
     const puppetClient = this.puppet.getClient();
 
@@ -123,32 +130,39 @@ export class Base implements BaseInterface {
       info("found matrix room via alias. room_id:", room_id);
       return grantPuppetMaxPowerLevel(room_id);
     }, (_err) => {
-      const name = this.adapter.serviceName + " Protocol";
-      const topic = this.adapter.serviceName + " Protocol Status Messages";
+      const name = "Puppet Status Room";
+      const topic = "Puppet Status Messages";
       info("creating status room !!!!", ">>>>"+roomAliasLocalPart+"<<<<", name, topic);
       return botIntent.createRoom({
         createAsClient: false,
         options: {
-          name, topic, room_alias_name: roomAliasLocalPart
+          name,
+          topic,
+          room_alias_name: roomAliasLocalPart
         }
       }).then(({room_id}) => {
-        info("status room created", room_id, roomAliasLocalPart);
-        if (this.adapter.serviceIconPath) {
-          return this.setRoomAvatarFromDisk(room_id, this.adapter.serviceIconPath).then(()=>room_id);
-        }
-        return room_id;
+        return this.puppet.client.setRoomTag(room_id, 'm.lowpriority', {}).then(() => {
+          if (this.adapter.serviceIconPath) {
+            return this.setRoomAvatarFromDisk(room_id, this.adapter.serviceIconPath).then(()=>room_id);
+          }
+          return room_id;
+        }).catch(err => {
+          error(err);
+          return room_id;
+        });
       });
     }).then(matrixRoomId => {
       info("making puppet join protocol status room", matrixRoomId);
       return puppetClient.joinRoom(matrixRoomId).then(() => {
         info("puppet joined the protocol status room");
+        this.statusRoomId = matrixRoomId;
         return grantPuppetMaxPowerLevel(matrixRoomId);
       }, (err) => {
         if (err.message === 'No known servers') {
           warn('we cannot use this room anymore because you cannot currently rejoin an empty room (synapse limitation? riot throws this error too). we need to de-alias it now so a new room gets created that we can actually use.');
           return botClient.deleteAlias(roomAlias).then(()=>{
             warn('deleted alias... trying again to get or create room.');
-            return this.getStatusRoomId(_roomAliasLocalPart);
+            return this.getStatusRoomId(_roomAliasLocalPart, true);
           });
         } else {
           warn("ignoring error from puppet join room: ", err.message);
@@ -214,40 +228,42 @@ export class Base implements BaseInterface {
       var botIntent = this.bridge.getIntent();
       if (botIntent === null) {
         warn('cannot send a status message before the bridge is ready');
-        return false;
+        return Promise.resolve();
       }
       let promiseList = [];
 
-      promiseList.push(() => {
+      promiseList.push(new Promise((resolve, reject) => {
         info("joining protocol bot to room >>>", statusRoomId, "<<<");
-        botIntent.join(statusRoomId);
-      });
+        return resolve(botIntent.join(statusRoomId));
+      }));
 
       // AS Bots don't have display names? Weird...
       // PUT https://<REDACTED>/_matrix/client/r0/profile/%40hangoutsbot%3Aexample.org/displayname (AS) HTTP 404 Error: {"errcode":"M_UNKNOWN","error":"No row found"}
       //promiseList.push(() => botIntent.setDisplayName(this.getServiceName() + " Bot"));
 
-      promiseList.push(() => {
+      promiseList.push(new Promise((resolve, reject) => {
         let txt = this.tagMatrixMessage(msgText); // <-- Important! Or we will cause message looping...
         if(options.fixedWidthOutput)
         {
-          return botIntent.sendMessage(statusRoomId, {
+          return resolve(botIntent.sendMessage(statusRoomId, {
             body: txt,
             formatted_body: "<pre><code>" + entities.encode(txt) + "</code></pre>",
             format: "org.matrix.custom.html",
             msgtype: "m.notice"
-          });
+          }));
         }
         else
         {
-          return botIntent.sendMessage(statusRoomId, {
+          return resolve(botIntent.sendMessage(statusRoomId, {
             body: txt,
             msgtype: "m.notice"
-          });
+          }));
         }
-      });
+      }));
 
       return Promise.all(promiseList);
+    }).then(() => {
+      return; // make sure we return Promise<void>
     });
   }
 
@@ -263,8 +279,12 @@ export class Base implements BaseInterface {
     const patt = new RegExp(`^#${this.network}_puppet_${this.identityPair.id}_([a-zA-Z0-9+\\/=_]+)$`);
     const room = this.puppet.getClient().getRoom(matrixRoomId);
     info('reducing array of alases to a 3prid');
+    let status = '#'+this.getStatusRoomLocalpart();
     return room.getAliases().reduce((result, alias) => {
       const localpart = alias.split(':')[0];
+      if (localpart == status) {
+        return 'status_room';
+      }
       const matches = localpart.match(patt);
       return matches ? matches[1] : result;
     }, null);
@@ -285,6 +305,7 @@ export class Base implements BaseInterface {
 
   private getIntentFromThirdPartySenderId(userId: string, name?: string, avatarUrl?: string) : Promise<Intent> {
     const ghostIntent = this.bridge.getIntent(this.getGhostUserFromThirdPartySenderId(userId));
+    // TODO: cache name & avatarUrl of ghost locally
 
     let promiseList = [];
 
@@ -295,7 +316,7 @@ export class Base implements BaseInterface {
         if (remoteUser.get('name')) {
           return ghostIntent.setDisplayName(remoteUser.get('name'));
         }
-      }))
+      }));
     }
 
     if (avatarUrl) {
@@ -305,7 +326,7 @@ export class Base implements BaseInterface {
         if (remoteUser.get('avatarUrl')) {
           return this.setGhostAvatar(ghostIntent, remoteUser.get('avatarUrl'));
         }
-      }))
+      }));
     }
 
     return Promise.all(promiseList).then(() => {
@@ -349,7 +370,12 @@ export class Base implements BaseInterface {
     });
   }
 
-  private getOrCreateMatrixRoomFromThirdPartyRoomId(thirdPartyRoomId: string) : Promise<string> {
+  private getOrCreateMatrixRoomFromThirdPartyRoomId(thirdPartyRoomId: string, force = false) : Promise<string> {
+    if (!force && (thirdPartyRoomId in this.thirdPartyRooms)) {
+      return new Promise<string>((resolve, reject) => {
+        resolve(this.thirdPartyRooms[thirdPartyRoomId]);
+      })
+    }
     const roomAlias = this.getRoomAliasFromThirdPartyRoomId(thirdPartyRoomId);
     const roomAliasName = this.getRoomAliasLocalPartFromThirdPartyRoomId(thirdPartyRoomId);
     info('looking up', thirdPartyRoomId, '('+roomAlias+')');
@@ -369,7 +395,38 @@ export class Base implements BaseInterface {
         return room_id;
       });
     };
+    
+    const makeDirect = (room_id) => {
+      // taken from https://github.com/matrix-org/matrix-react-sdk/blob/a5aa497287ec9a8d7536f14657bbee9406ebc6fa/src/Rooms.js#L103
+      const mDirectEvent = puppetClient.getAccountData('m.direct');
+      let dmRoomMap = {};
+      
+      if (mDirectEvent !== undefined) {
+        dmRoomMap = mDirectEvent.getContent();
+      }
+      
+      // remove it from the lists of any others users
+      // (it can only be a DM room for one person)
+      for (const thisUserId of Object.keys(dmRoomMap)) {
+        const roomList = dmRoomMap[thisUserId];
 
+        if (thisUserId != roomAlias) {
+          const indexOfRoom = roomList.indexOf(room_id);
+          if (indexOfRoom > -1) {
+            roomList.splice(indexOfRoom, 1);
+          }
+        }
+      }
+      
+      const roomList = dmRoomMap[roomAlias] || [];
+      if (roomList.indexOf(room_id) == -1) {
+        roomList.push(room_id);
+      }
+      dmRoomMap[roomAlias] = roomList;
+      
+      return puppetClient.setAccountData('m.direct', dmRoomMap).then(() => room_id);
+    }
+    
     return puppetClient.getRoomIdForAlias(roomAlias).then(({room_id}) => {
       info("found matrix room via alias. room_id:", room_id);
       return room_id;
@@ -377,7 +434,7 @@ export class Base implements BaseInterface {
       info("the room doesn't exist. we need to create it for the first time");
       return Promise.resolve(this.adapter.getRoomData(b2a(thirdPartyRoomId))).then(thirdPartyRoomData => {
         info("got 3p room data", thirdPartyRoomData);
-        const { name, topic, avatarUrl } = thirdPartyRoomData;
+        const { name, topic, avatarUrl, isDirect } = thirdPartyRoomData;
         info("creating room !!!!", ">>>>"+roomAliasName+"<<<<", name, topic);
         // it seems we will run into M_EXCLUSIVE even with a ghost intent...
         // we are forced to use the bot intent to create the room :(
@@ -386,29 +443,39 @@ export class Base implements BaseInterface {
         return botIntent.createRoom({
           createAsClient: true, // bot won't auto-join the room in this case
           options: {
-            name, topic, room_alias_name: roomAliasName
+            name,
+            topic,
+            room_alias_name: roomAliasName,
+            visibility: 'private',
+            invite: [puppetUserId]
           }
         }).then(({room_id}) => {
           info("room created", room_id, roomAliasName);
-
+          let promiseList = [];
           if (avatarUrl) {
-            return this.setRoomAvatar(room_id, avatarUrl).then(()=>room_id);
+            promiseList.push(this.setRoomAvatar(room_id, avatarUrl).then(()=>room_id));
           }
 
-          return room_id;
+          if (isDirect) {
+            promiseList.push(makeDirect(room_id));
+          }
+
+          promiseList.push(grantPuppetMaxPowerLevel(room_id));
+
+          return Promise.all(promiseList).then(()=>room_id);
         });
       });
     }).then(matrixRoomId => {
       info("making puppet join room", matrixRoomId);
       return puppetClient.joinRoom(matrixRoomId).then(()=>{
         info("returning room id after join room attempt", matrixRoomId);
-        return grantPuppetMaxPowerLevel(matrixRoomId);
+        return matrixRoomId;
       }, (err) => {
         if ( err.message === 'No known servers' ) {
           warn('we cannot use this room anymore because you cannot currently rejoin an empty room (synapse limitation? riot throws this error too). we need to de-alias it now so a new room gets created that we can actually use.');
           return botClient.deleteAlias(roomAlias).then(()=>{
             warn('deleted alias... trying again to get or create room.');
-            return this.getOrCreateMatrixRoomFromThirdPartyRoomId(thirdPartyRoomId);
+            return this.getOrCreateMatrixRoomFromThirdPartyRoomId(thirdPartyRoomId, true);
           });
         } else {
           warn("ignoring error from puppet join room: ", err.message);
@@ -416,17 +483,41 @@ export class Base implements BaseInterface {
         }
       });
     }).then(matrixRoomId => {
+      // the naming scheme is significantly different, we would never collide so we might as well use the same map for both directions
       this.thirdPartyRooms[matrixRoomId] = thirdPartyRoomId;
+      this.thirdPartyRooms[thirdPartyRoomId] = matrixRoomId;
       botIntent.leave(matrixRoomId); // workaround because createAsClient doesnt work
       return matrixRoomId;
     });
   }
 
-  private prepareMessageHandler(params : PrepareMessageHandlerParams) : Promise<MessageHandler> {
+  private roomGhostMap:Map<string, string[]> = new Map<string, string[]>();
+  private inviteAndJoinMatrixRoom(ghostIntent, roomId: string, force = false): Promise<void> {
+    const ghostId = ghostIntent.getClient().credentials.userId;
+    if (!force && (roomId in this.roomGhostMap) && this.roomGhostMap[roomId].indexOf(ghostId) !== -1) {
+      return Promise.resolve();
+    }
+    const addGhostToCache = () => {
+      if (!(roomId in this.roomGhostMap)) {
+        this.roomGhostMap[roomId] = [];
+      }
+      this.roomGhostMap[roomId].push(ghostId);
+    };
+    return this.puppet.client.invite(roomId, ghostId).then(() => {
+      return ghostIntent.join(roomId).then(addGhostToCache);
+    }).catch(err => {
+      if (err.name == 'M_FORBIDDEN') {
+        return ghostIntent.join(roomId).then(addGhostToCache);
+      }
+      return this.sendStatusMsg({}, err);
+    });
+  }
+
+  private prepareMessageHandler(params : PrepareMessageHandlerParams, force = false) : Promise<MessageHandler> {
     const { text, senderId, senderName, avatarUrl, roomId } = params;
     const tag = autoTagger(senderId, this);
 
-    return this.getOrCreateMatrixRoomFromThirdPartyRoomId(roomId).then((matrixRoomId) => {
+    return this.getOrCreateMatrixRoomFromThirdPartyRoomId(roomId, force).then((matrixRoomId) => {
       if (senderId === undefined) {
         let handler : MessageHandler = { tag, matrixRoomId, client: this.puppet.client }
         if ( this.isTaggedMatrixMessage(text) ) {
@@ -438,7 +529,7 @@ export class Base implements BaseInterface {
           return this.getStatusRoomId().then((statusRoomId)=>{
             return ghostIntent.join(statusRoomId);
           }).then(()=>{
-            return ghostIntent.join(matrixRoomId).then(()=>{
+            return this.inviteAndJoinMatrixRoom(ghostIntent, matrixRoomId, force).then(()=>{
               let handler : MessageHandler = { tag, matrixRoomId, client: ghostIntent.getClient() };
               return handler;
             });
@@ -446,6 +537,19 @@ export class Base implements BaseInterface {
         });
       }
     });
+  }
+
+  private prepareAndSendMessageHandler(prep: PrepareMessageHandlerParams, sendMessage) : Promise<void> {
+    return this.prepareMessageHandler(prep)
+      .then(sendMessage)
+      .catch(err=> {
+        warn("Couldn't prepare message handler, forcing new state...");
+        error(err);
+        return this.prepareMessageHandler(prep, true).then(sendMessage);
+      })
+      .then(() => {
+        return; // make the promise <void>
+      });
   }
 
   /**
@@ -471,8 +575,8 @@ export class Base implements BaseInterface {
     const prep : PrepareMessageHandlerParams = {
       text, senderId, senderName, avatarUrl, roomId
     };
-
-    return this.prepareMessageHandler(prep).then(handler=>{
+    
+    const sendMessage = (handler) => {
       if (handler.ignore) return;
       const { tag, matrixRoomId, client } = handler;
       const { upload } = createUploader(client, text, mimetype);
@@ -508,7 +612,9 @@ export class Base implements BaseInterface {
         };
         return client.sendMessage(matrixRoomId, opts);
       });
-    });
+    };
+
+    return this.prepareAndSendMessageHandler(prep, sendMessage);
   }
   /**
    * Returns a promise
@@ -529,7 +635,8 @@ export class Base implements BaseInterface {
     const prep : PrepareMessageHandlerParams = {
       text, senderId, senderName, avatarUrl, roomId
     }
-    return this.prepareMessageHandler(prep).then(handler=>{
+    
+    const sendMessage = (handler) => {
       if (handler.ignore) return;
       const { tag, matrixRoomId, client } = handler;
       if (html) {
@@ -545,10 +652,8 @@ export class Base implements BaseInterface {
           msgtype: "m.text"
         });
       }
-    }).catch(err=>{
-      error(err);
-      this.sendStatusMsg({}, err, payload);
-    });
+    };
+    return this.prepareAndSendMessageHandler(prep, sendMessage);
   }
 
   public handleMatrixEvent(req, _context) {
@@ -573,9 +678,9 @@ export class Base implements BaseInterface {
 
     const thirdPartyRoomId = this.getThirdPartyRoomIdFromMatrixRoomId(room_id);
     const isStatusRoom = thirdPartyRoomId === "status_room";
-
+    
     if (!thirdPartyRoomId) {
-      promise = () => Promise.reject(new Error('could not determine third party room id!'));
+      promise = () => Promise.resolve(); // not our network prefix
     } else if (isStatusRoom) {
       info("ignoring incoming message to status room");
 
@@ -647,26 +752,30 @@ export class Base implements BaseInterface {
 
   private setGhostAvatar(ghostIntent, avatarUrl) {
     const client = ghostIntent.getClient();
-
+    const uploadAvatar = () => {
+      info('downloading avatar from public web', avatarUrl);
+      return download.getBufferAndType(avatarUrl).then(({buffer, type})=> {
+        let opts = {
+          name: path.basename(avatarUrl),
+          type,
+          rawResponse: false
+        };
+        return client.uploadContent(buffer, opts);
+      }).then((res)=>{
+        const contentUri = res.content_uri;
+        info('uploaded avatar and got back content uri', contentUri);
+        return ghostIntent.setAvatarUrl(contentUri);
+      });
+    };
     return client.getProfileInfo(client.credentials.userId, 'avatar_url').then(({avatar_url})=>{
       if (avatar_url) {
         info('refusing to overwrite existing avatar');
         return null;
       } else {
-        info('downloading avatar from public web', avatarUrl);
-        return download.getBufferAndType(avatarUrl).then(({buffer, type})=> {
-          let opts = {
-            name: path.basename(avatarUrl),
-            type,
-            rawResponse: false
-          };
-          return client.uploadContent(buffer, opts);
-        }).then((res)=>{
-          const contentUri = res.content_uri;
-          info('uploaded avatar and got back content uri', contentUri);
-          return ghostIntent.setAvatarUrl(contentUri);
-        });
+        return uploadAvatar();
       }
+    }).catch(err => {
+      return uploadAvatar();
     });
   }
 
