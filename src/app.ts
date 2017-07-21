@@ -5,8 +5,7 @@ import { Config, Deduplication, IdentityPair, User } from './config';
 import { BridgeController } from './bridge';
 import * as fs  from 'async-file';
 import * as npm from 'npm';
-
-import * as tc from 'typed-promisify';
+import { ghostCache } from './ghost-cache';
 
 const debug = require('debug')('matrix-puppet:debug');
 const info = require('debug')('matrix-puppet:info');
@@ -95,6 +94,7 @@ export class App {
   }
 
   private async run(port) : Promise<void> {
+    await ghostCache.load();
     let users : string[] = []; // this array holds all the usernames of valid people for easy lookup
     for (let u in this.config.users) {
       users.push(u);

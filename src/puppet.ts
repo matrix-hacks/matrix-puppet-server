@@ -6,7 +6,6 @@ import { Deduplication, Homeserver, IdentityPair, User } from './config';
 import { associateToken, TokenAssociationParams } from './associate-token';
 import { Bridge } from 'matrix-appservice-bridge';
 import { Base } from './base'
-import { BaseInterface } from 'matrix-puppet-bridge'
 
 interface PuppetIdentity extends User {
   localpart: string;
@@ -142,9 +141,7 @@ export class Puppet {
     dedupe: Deduplication,
     bridge: Bridge
   ) {
-    let base = new Base(ident, network, this, bridge, dedupe);
-    let adapter = new adapterClass(ident.matrixPuppet, ident.thirdParty, base);
-    base.setAdapter(adapter);
+    let base = new Base(ident, network, this, bridge, adapterClass, dedupe);
     this.bases.push(base);
   }
 

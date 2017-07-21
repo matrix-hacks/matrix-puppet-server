@@ -45,4 +45,8 @@ export interface MatrixClient {
   setAccountData(eventType: string, contents: any): Promise<void>;
   invite(roomId: string, userId: string): Promise<void>;
   setRoomTag(roomId: string, tagName: string, metadata): Promise<void>;
+  setPowerLevel(roomId: string, userId: string, powrLevel: number): Promise<void>;
+  getUserId(): string;
+  setRoomName(roomId: string, name: string): Promise<void>;
+  sendStateEvent(roomId: string, eventType: string, content: any, stateKey: string): Promise<void>;
 }
