@@ -29,6 +29,10 @@ export interface SendMessageParams {
   msgtype: string;
 }
 
+export interface CreateRoomResponse {
+  room_id: string;
+}
+
 export interface MatrixClient {
   startClient(): void;
   on(name: string, any): void;
@@ -46,7 +50,7 @@ export interface MatrixClient {
   invite(roomId: string, userId: string): Promise<void>;
   setRoomTag(roomId: string, tagName: string, metadata): Promise<void>;
   setPowerLevel(roomId: string, userId: string, powrLevel: number): Promise<void>;
-  getUserId(): string;
   setRoomName(roomId: string, name: string): Promise<void>;
   sendStateEvent(roomId: string, eventType: string, content: any, stateKey: string): Promise<void>;
+  createRoom(options: any): Promise<CreateRoomResponse>;
 }

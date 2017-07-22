@@ -21,4 +21,5 @@ export interface Intent {
   setDisplayName(name: string): Promise<void>;
   leave(roomId: string): Promise<void>;
   setRoomAvatar(roomId: string, mxContentUri: string): Promise<void>;
+  createAlias(alias: string, roomId: string): Promise<void>;
 }
