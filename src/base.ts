@@ -123,17 +123,17 @@ export class Base {
     
     this.bridge = bridge;
     this.adapter = new adapterClass(identityPair.matrixPuppet, identityPair.thirdParty, <PuppetBridge>{
-      newUsers: (a, ...args) => {
-        return this.joinThirdPartyUsersToStatusRoom(a, ...args);
+      newUsers: (a) => {
+        return this.joinThirdPartyUsersToStatusRoom(a);
       },
       sendStatusMsg: (a, ...args) => {
         return this.sendStatusMsg(a, ...args);
       },
-      sendImageMessage: (a, ...args) => {
-        return this.handleThirdPartyRoomImageMessage(a, ...args);
+      sendImageMessage: (a) => {
+        return this.handleThirdPartyRoomImageMessage(a);
       },
-      sendMessage: (a, ...args) => {
-        return this.handleThirdPartyRoomMessage(a, ...args);
+      sendMessage: (a) => {
+        return this.handleThirdPartyRoomMessage(a);
       },
     });
     info('initialized bridge');
