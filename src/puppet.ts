@@ -3,7 +3,7 @@ const matrixSdk = require("matrix-js-sdk");
 
 import { MatrixClient } from './matrix-client';
 import { IdentityPair } from './identity-pair';
-import { Deduplication, Homeserver, User } from './config';
+import { Homeserver, User } from './config';
 import { associateToken, TokenAssociationParams } from './associate-token';
 import { Bridge } from 'matrix-appservice-bridge';
 import { Base } from './base'
@@ -139,10 +139,9 @@ export class Puppet {
     adapterClass: any,
     ident: IdentityPair,
     network: string,
-    dedupe: Deduplication,
     bridge: Bridge
   ) {
-    let base = new Base(ident, network, this, bridge, adapterClass, dedupe);
+    let base = new Base(ident, network, this, bridge, adapterClass);
     this.bases.push(base);
   }
 

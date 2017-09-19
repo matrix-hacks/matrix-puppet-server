@@ -24,13 +24,7 @@ export interface User {
   token?: string;
 }
 
-export interface Deduplication {
-  tag: string;
-  pattern: string;
-}
-
 export interface Network {
-  deduplication?: Deduplication;
   identityPairs: Map<string, IdentityPair_Config>;
 }
 

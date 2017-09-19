@@ -11,7 +11,6 @@ import * as fs from 'async-file';
 
 import { Puppet } from './puppet';
 import { IdentityPair } from './identity-pair';
-import { Deduplication } from './config';
 import { BridgeController, ThirdPartyLookup } from './bridge';
 import { Intent } from './intent';
 import { MatrixClient } from './matrix-client';
@@ -113,14 +112,11 @@ export class Base {
   private network: string;
   private thirdPartyRooms: Map<string, string> = new Map<string, string>();
 
-  constructor(identityPair: IdentityPair, network: string, puppet: Puppet, bridge: Bridge, adapterClass: any, dedupe?: Deduplication) {
+  constructor(identityPair: IdentityPair, network: string, puppet: Puppet, bridge: Bridge, adapterClass: any) {
     this.identityPair = identityPair;
     this.puppet = puppet;
     this.network = network;
     
-    this.deduplicationTag = (dedupe && dedupe.tag) || this.defaultDeduplicationTag();
-    this.deduplicationTagPattern = (dedupe && dedupe.pattern) || this.defaultDeduplicationTagPattern();
-    this.deduplicationTagRegex = new RegExp(this.deduplicationTagPattern);
     
     this.bridge = bridge;
     this.adapter = new adapterClass(identityPair.matrixPuppet, identityPair.thirdParty, <PuppetBridge>{
@@ -137,6 +133,9 @@ export class Base {
         return this.handleThirdPartyRoomMessage(a);
       },
     });
+    this.deduplicationTag = this.adapter.deduplicationTag;
+    this.deduplicationTagPattern = this.adapter.deduplicationTagPattern;
+    this.deduplicationTagRegex = new RegExp(this.deduplicationTagPattern);
     info('initialized bridge');
   }
 
@@ -339,11 +338,8 @@ export class Base {
     const patt = new RegExp(`^#${this.network}_puppet_${this.identityPair.id}_([a-zA-Z0-9+\\/=_]+)$`);
     const room = this.puppet.getClient().getRoom(matrixRoomId);
     info('reducing array of alases to a 3prid');
-    debug(room.getAliases());
-    debug(`^#${this.network}_puppet_${this.identityPair.id}_([a-zA-Z0-9+\\/=_]+)$`);
     let status = '#'+this.getStatusRoomLocalpart();
     return room.getAliases().reduce((result, alias) => {
-      debug(alias);
       const localpart = alias.split(':')[0];
       if (localpart == status) {
         return 'status_room';
@@ -925,13 +921,7 @@ export class Base {
       this.sendStatusMsg({}, err, data);
     });
   }
-
-  private defaultDeduplicationTag() {
-    return " \ufeff";
-  }
-  private defaultDeduplicationTagPattern() {
-    return " \\ufeff$";
-  }
+  
   private tagMatrixMessage(text) {
     return text+this.deduplicationTag;
   }

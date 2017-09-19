@@ -6,3 +6,5 @@ config.json
 ghost_cache.json
 registration.yaml
 *.db
+// slack file creations
+data-*.json
