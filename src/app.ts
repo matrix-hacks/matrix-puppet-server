@@ -1,7 +1,7 @@
 import { AppServiceRegistration, Cli, Bridge, Base, ThirdPartyAdapter } from 'matrix-appservice-bridge';
 
 import { Puppet } from './puppet';
-import { Config, Deduplication, IdentityPair, User } from './config';
+import { Config, Deduplication, IdentityPair_Config, User } from './config';
 import { BridgeController } from './bridge';
 import * as fs  from 'async-file';
 import * as npm from 'npm';
@@ -122,6 +122,7 @@ export class App {
       try {
         net = require('matrix-puppet-'+network);
       } catch (e) {
+        debug(e);
         await this.installNpmPackage('matrix-puppet-'+network);
         net = require('matrix-puppet-'+network);
       }
@@ -133,7 +134,7 @@ export class App {
       // okay let's loop through all identity pairs of this network and add them to the puppet
       let dedupe: Deduplication = this.config.networks[network].deduplication;
       for (let identId in this.config.networks[network].identityPairs) {
-        let ident: IdentityPair = <IdentityPair>{
+        let ident = <IdentityPair_Config>{
           id: identId,
           ...this.config.networks[network].identityPairs[identId]
         };

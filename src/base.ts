@@ -10,7 +10,8 @@ import { autoTagger, createUploader } from './utils';
 import * as fs from 'async-file';
 
 import { Puppet } from './puppet';
-import { Deduplication, IdentityPair } from './config';
+import { IdentityPair } from './identity-pair';
+import { Deduplication } from './config';
 import { BridgeController, ThirdPartyLookup } from './bridge';
 import { Intent } from './intent';
 import { MatrixClient } from './matrix-client';
@@ -338,8 +339,11 @@ export class Base {
     const patt = new RegExp(`^#${this.network}_puppet_${this.identityPair.id}_([a-zA-Z0-9+\\/=_]+)$`);
     const room = this.puppet.getClient().getRoom(matrixRoomId);
     info('reducing array of alases to a 3prid');
+    debug(room.getAliases());
+    debug(`^#${this.network}_puppet_${this.identityPair.id}_([a-zA-Z0-9+\\/=_]+)$`);
     let status = '#'+this.getStatusRoomLocalpart();
     return room.getAliases().reduce((result, alias) => {
+      debug(alias);
       const localpart = alias.split(':')[0];
       if (localpart == status) {
         return 'status_room';
@@ -366,6 +370,7 @@ export class Base {
   private getIntentFromThirdPartySenderId(userId: string, name?: string, avatarUrl?: string, matrixRoomData?: NewMatrixRoomData) : Promise<Intent> {
     const ghostUserId = this.getGhostUserFromThirdPartySenderId(userId);
     const ghostIntent = this.bridge.getIntent(ghostUserId);
+    const botClient = this.getIntentFromApplicationServerBot().getClient();
     // TODO: cache name & avatarUrl of ghost locally
 
     let promiseList = [];
@@ -389,12 +394,12 @@ export class Base {
         }).then((matrixRoomIds) => {
           let namePromiseList = [];
           matrixRoomIds.forEach((roomId) => {
-            namePromiseList.push(this.puppet.client.setRoomName(roomId, _name));
+            namePromiseList.push(botClient.setRoomName(roomId, _name));
           });
           return Promise.all(namePromiseList);
         });
       } else if (matrixRoomData && matrixRoomData.matrixRoomId && matrixRoomData.createdNeedName) {
-        return this.puppet.client.setRoomName(matrixRoomData.matrixRoomId, _name);
+        return botClient.setRoomName(matrixRoomData.matrixRoomId, _name);
       }
       return Promise.resolve();
     };
@@ -433,7 +438,7 @@ export class Base {
           let avatarPromiseList = [];
           debug(contentUri);
           matrixRoomIds.forEach((roomId) => {
-            avatarPromiseList.push(this.puppet.client.sendStateEvent(roomId, 'm.room.avatar', { url: contentUri }, ''));
+            avatarPromiseList.push(botClient.sendStateEvent(roomId, 'm.room.avatar', { url: contentUri }, ''));
           });
           return Promise.all(avatarPromiseList);
         }).then(() => {
@@ -442,7 +447,7 @@ export class Base {
       } else if (matrixRoomData && matrixRoomData.matrixRoomId && matrixRoomData.createdNeedAvatar) {
         return ghostIntent.getClient().getProfileInfo(ghostUserId, 'avatar_url').then(({avatar_url})=>{
           if (avatar_url) {
-            return this.puppet.client.sendStateEvent(matrixRoomData.matrixRoomId, 'm.room.avatar', { url: avatar_url }, '');
+            return botClient.sendStateEvent(matrixRoomData.matrixRoomId, 'm.room.avatar', { url: avatar_url }, '');
           }
         });
       }
@@ -597,10 +602,10 @@ export class Base {
         if (ghostIntent) {
           inviteArray.push(ghostId);
         }
-        inviteArray.push(botClient.credentials.userId);
+        inviteArray.push(puppetUserId);
         
         debug(inviteArray);
-        return this.puppet.client.createRoom({
+        return botClient.createRoom({
             name,
             topic,
             visibility: 'private',
@@ -608,15 +613,18 @@ export class Base {
         }).then(({room_id}) => {
           info("room created", room_id);
           let promiseList = [];
+          promiseList.push(botIntent.createAlias(roomAlias, room_id));
+          
           if (ghostIntent) {
             promiseList.push(ghostIntent.getClient().joinRoom(room_id));
-            promiseList.push(this.puppet.client.setPowerLevel(room_id, ghostId, 100).catch(err => {
+            promiseList.push(botClient.setPowerLevel(room_id, ghostId, 100).catch(err => {
               warn('Failed to make ghost an admin');
             }));
           }
           
-          promiseList.push(botIntent.join(room_id).then(() => {
-            return botIntent.createAlias(roomAlias, room_id);
+          promiseList.push(puppetClient.joinRoom(room_id));
+          promiseList.push(botClient.setPowerLevel(room_id, puppetUserId, 100).catch(err => {
+            warn('Failed to make ourself an admin');
           }));
           
           if (avatarUrl) {
@@ -661,11 +669,7 @@ export class Base {
       // the naming scheme is significantly different, we would never collide so we might as well use the same map for both directions
       this.thirdPartyRooms[matrixRoomId] = thirdPartyRoomId;
       this.thirdPartyRooms[thirdPartyRoomId] = matrixRoomId;
-      botIntent.leave(matrixRoomId).then(() => {
-        return this.puppet.client.invite(matrixRoomId, botClient.credentials.userId);
-      }).catch(err => {
-        warn(err);
-      });
+      
       return <NewMatrixRoomData>{
         matrixRoomId,
         createdNeedName: _createdNeedName,
@@ -676,6 +680,9 @@ export class Base {
 
   private roomGhostMap:Map<string, string[]> = new Map<string, string[]>();
   private inviteAndJoinMatrixRoom(ghostIntent, roomId: string, force = false): Promise<void> {
+    const botIntent = this.getIntentFromApplicationServerBot();
+    const botClient = botIntent.getClient();
+    
     const ghostId = ghostIntent.getClient().credentials.userId;
     if (!force && (roomId in this.roomGhostMap) && this.roomGhostMap[roomId].indexOf(ghostId) !== -1) {
       return Promise.resolve();
@@ -687,14 +694,14 @@ export class Base {
       }
       this.roomGhostMap[roomId].push(ghostId);
     }).then(() => {
-      return this.puppet.client.setPowerLevel(roomId, ghostId, 100).then(() => {
+      return botClient.setPowerLevel(roomId, ghostId, 100).then(() => {
         info('granted ghost max power level');
       }).catch((err) => {
         warn(err);
         warn('Ignorning granting ghost power');
       });
     });
-    return this.puppet.client.invite(roomId, ghostId).then(() => {
+    return botClient.invite(roomId, ghostId).then(() => {
       return joinPromise;
     }).catch(err => {
       if (err.name == 'M_FORBIDDEN') {
@@ -871,7 +878,7 @@ export class Base {
 
     const thirdPartyRoomId = this.getThirdPartyRoomIdFromMatrixRoomId(room_id);
     const isStatusRoom = thirdPartyRoomId === "status_room";
-    
+    debug(thirdPartyRoomId);
     if (!thirdPartyRoomId) {
       promise = () => Promise.resolve(); // not our network prefix
     } else if (isStatusRoom) {
@@ -906,6 +913,8 @@ export class Base {
           }
           return this.adapter.sendImageMessage(b2a(thirdPartyRoomId), image);
         };
+      } else if (msgtype === 'm.emote') {
+        promise = () => this.adapter.sendEmoteMessage(b2a(thirdPartyRoomId), msg);
       } else {
         let err = 'dont know how to handle this msgtype '+msgtype;
         promise = () => Promise.reject(new Error(err));

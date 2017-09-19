@@ -1,4 +1,4 @@
-export interface IdentityPair {
+export interface IdentityPair_Config {
   // Short string to distinguishes this pair from others on the homeserver, used in alises and ghost ids.
   id?: string;
 
@@ -31,7 +31,7 @@ export interface Deduplication {
 
 export interface Network {
   deduplication?: Deduplication;
-  identityPairs: Map<string, IdentityPair>;
+  identityPairs: Map<string, IdentityPair_Config>;
 }
 
 export interface Config {

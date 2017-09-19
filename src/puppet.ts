@@ -2,7 +2,8 @@ const Promise = require('bluebird');
 const matrixSdk = require("matrix-js-sdk");
 
 import { MatrixClient } from './matrix-client';
-import { Deduplication, Homeserver, IdentityPair, User } from './config';
+import { IdentityPair } from './identity-pair';
+import { Deduplication, Homeserver, User } from './config';
 import { associateToken, TokenAssociationParams } from './associate-token';
 import { Bridge } from 'matrix-appservice-bridge';
 import { Base } from './base'
