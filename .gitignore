@@ -3,6 +3,7 @@ dist
 typings
 package-lock.json
 config.json
+config.json.bak
 ghost_cache.json
 registration.yaml
 *.db

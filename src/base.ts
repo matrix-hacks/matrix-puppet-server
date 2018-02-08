@@ -461,6 +461,9 @@ export class Base {
         return this.getOrInitRemoteUserStoreDataFromThirdPartyUserId(userId).then((remoteUser)=>{
           let _url = remoteUser.get('avatarUrl');
           return ghostCache.shouldUpdateAvatarUrl(ghostUserId, _url).then((should) => {
+            if (!_url) {
+              return;
+            }
             return updateavatarPromise(should, _url);
           })
         });
