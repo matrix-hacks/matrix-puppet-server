@@ -500,9 +500,6 @@ export class Base {
           // invite ghost if needed
           if (ghostIntent) {
             promiseList.push(ghostIntent.getClient().joinRoom(room_id));
-            promiseList.push(puppetClient.setPowerLevel(room_id, ghostId, 100).catch(err => {
-              warn('Failed to make ghost an admin');
-            }));
           }
           
           // add avatar
@@ -549,13 +546,6 @@ export class Base {
         this.roomGhostMap[roomId] = [];
       }
       this.roomGhostMap[roomId].push(ghostId);
-    }).then(() => {
-      return puppetClient.setPowerLevel(roomId, ghostId, 100).then(() => {
-        info('granted ghost max power level');
-      }).catch((err) => {
-        warn(err);
-        warn('Ignorning granting ghost power');
-      });
     });
     return puppetClient.invite(roomId, ghostId).then(() => {
       return joinPromise;
@@ -715,6 +705,8 @@ export class Base {
     if (data.type === 'm.room.message') {
       info('incoming message. data:', data);
       return this.handleMatrixMessageEvent(data);
+    } else if (data.type === 'm.room.member') {
+      return this.handleMatrixMemberEvent(data);
     } else {
       return warn('ignored a matrix event', data.type);
     }
@@ -758,6 +750,59 @@ export class Base {
         let err = 'dont know how to handle this msgtype '+msgtype;
         return Promise.reject(new Error(err));
       }
+    });
+  }
+  
+  private handleMatrixMemberEvent(data) {
+    const { membership, room_id, sender, state_key, content: {is_direct}, user_id } = data;
+    if (membership != 'invite' || !is_direct || user_id != this.puppet.getClient().credentials.userId) {
+      return;
+    }
+    const matches = state_key.match(new RegExp(`^@_puppet_${this.network}_(.*)`));
+    if (!matches) {
+      return;
+    }
+    
+    const ghostIntent = this.bridge.getIntent(state_key);
+    if (!ghostIntent) {
+      return;
+    }
+    const ghostClient = ghostIntent.getClient();
+    const remote = matches[1].split(":")[0];
+    return this.adapter.getRoomByUser(b2a(remote)).then(remote => {
+      remote = a2b(remote);
+      debug(remote);
+      if (!remote) {
+        // not ours to handle
+        return ghostIntent.leave(room_id).then(() => {
+          this.puppet.getClient().leave(room_id);
+        });
+      }
+      info("Got invite joining room");
+      return ghostClient.joinRoom(room_id).then(
+        this.bridge.db.getAsync("SELECT id, mxid FROM rooms WHERE direct = 1 AND remote = $remote AND nid = $nid", {
+          $remote: remote,
+          $nid: this.network
+        }).then(r => {
+          // TODO: set room name etc. on new room
+          this.thirdPartyRooms[remote] = room_id;
+          if (r) {
+            // update room entry
+            return this.bridge.db.runAsync("UPDATE rooms SET mxid = $mxid WHERE id = $id", {
+              $mxid: room_id,
+              $id: r.id
+            }).then(() => {
+              // leave old room
+              return ghostIntent.leave(r.mxid);
+            });
+          }
+          return this.bridge.db.runAsync("INSERT INTO rooms (mxid, nid, remote, direct) VALUES ($mxid, $nid, $remote, 1)", {
+            $mxid: room_id,
+            $nid: this.network,
+            $remote: remote
+          });
+        })
+      );
     });
   }
   

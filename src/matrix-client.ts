@@ -53,4 +53,8 @@ export interface MatrixClient {
   setRoomName(roomId: string, name: string): Promise<void>;
   sendStateEvent(roomId: string, eventType: string, content: any, stateKey: string): Promise<void>;
   createRoom(options: any): Promise<CreateRoomResponse>;
+  setDeviceDetails(device_id: string, body: any): Promise<void>;
+  getDeviceId(): string;
+  getDevices(): Promise<any>;
+  leave(roomId: string): Promise<void>;
 }

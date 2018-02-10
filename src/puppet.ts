@@ -81,7 +81,7 @@ export class Puppet {
       baseUrl: this.homeserver.url,
       userId: this.userId,
       accessToken: token
-    })
+    });
     this.client.startClient();
     return new Promise((resolve, _reject) => {
       this.matrixRoomMembers = {};
@@ -104,11 +104,17 @@ export class Puppet {
 
       this.client.on('sync', (state) => {
         if ( state === 'PREPARED' ) {
+          console.log("=========");
           console.log('synced');
+          this.client.getDevices().then(d => {
+            console.log(this.client.getDeviceId());
+            console.log(d);
+          });
           resolve();
         }
       });
-    });
+    })
+    .then(this.client.setDeviceDetails(this.client.getDeviceId(), {display_name: 'Puppet Bridge'}));
   }
 
   public startAdapters() {

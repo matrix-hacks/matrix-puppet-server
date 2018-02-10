@@ -85,10 +85,10 @@ export class App {
         return {}; // auto provision users with no additional data
       },
       onEvent(req, context) {
-        debug("=========");
-        debug("NEW MATRIX EVENT");
-        debug(req);
-        debug(context);
+        //debug("=========");
+        //debug("NEW MATRIX EVENT");
+        //debug(req);
+        //debug(context);
         for (let p in self.puppets) {
           self.puppets[p].handleMatrixEvent(req, context);
         }
