@@ -10,13 +10,11 @@ import { autoTagger, createUploader } from './utils';
 import * as fs from 'async-file';
 
 import { Puppet } from './puppet';
-import { IdentityPair } from './identity-pair';
 import { BridgeController, ThirdPartyLookup } from './bridge';
 import { Intent } from './intent';
 import { MatrixClient } from './matrix-client';
 import * as tp from 'typed-promisify';
 import { entities } from 'matrix-puppet-bridge';
-import { ghostCache } from './ghost-cache'
 
 import {
   BangCommand, parseBangCommand,
@@ -48,12 +46,6 @@ interface MessageHandler {
   matrixRoomId: string;
   client: MatrixClient;
   ignore?: boolean;
-}
-
-interface NewMatrixRoomData {
-  matrixRoomId: string;
-  createdNeedName?: boolean;
-  createdNeedAvatar?: boolean;
 }
 
 const a2b = a => {
@@ -101,25 +93,29 @@ const b2a = b => {
   return decoded.toString('utf8', 0, j);
 }
 
+interface GhostCacheInterface {
+  name?: string;
+  avatarUrl?: string;
+}
+
 export class Base {
   public adapter: ThirdPartyAdapter;
   public bridge: Bridge;
-  private identityPair: IdentityPair;
   private puppet: Puppet;
   private deduplicationTag: string;
   private deduplicationTagPattern: string;
   private deduplicationTagRegex: RegExp;
-  private network: string;
+  private network: number;
   private thirdPartyRooms: Map<string, string> = new Map<string, string>();
+  private thirdPartyGhosts: Map<string, GhostCacheInterface> = new Map<string, GhostCacheInterface>();
 
-  constructor(identityPair: IdentityPair, network: string, puppet: Puppet, bridge: Bridge, adapterClass: any) {
-    this.identityPair = identityPair;
+  constructor(config: any, network: number, puppet: Puppet, bridge: Bridge, adapterClass: any) {
     this.puppet = puppet;
     this.network = network;
     
     
     this.bridge = bridge;
-    this.adapter = new adapterClass(identityPair.matrixPuppet, identityPair.thirdParty, <PuppetBridge>{
+    this.adapter = new adapterClass(config, <PuppetBridge>{
       newUsers: (a) => {
         return this.joinThirdPartyUsersToStatusRoom(a);
       },
@@ -156,7 +152,7 @@ export class Base {
    * @returns {Promise} Promise resolving the Matrix room ID of the status room
    */
   private getStatusRoomLocalpart(): string {
-    return "status_puppet_room__"+a2b(this.puppet.userId)+"_";
+    return "_puppet_room__"+a2b(this.puppet.userId)+"_";
   }
   private statusRoomId: string = '';
   private getStatusRoomId(_roomAliasLocalPart = '', force = false) {
@@ -334,22 +330,26 @@ export class Base {
     return this.puppet.makeRoomAlias(this.getRoomAliasLocalPartFromThirdPartyRoomId(id));
   }
 
-  private getThirdPartyRoomIdFromMatrixRoomId(matrixRoomId) {
-    const patt = new RegExp(`^#${this.network}_puppet_${this.identityPair.id}_([a-zA-Z0-9+\\/=_]+)$`);
-    const room = this.puppet.getClient().getRoom(matrixRoomId);
-    info('reducing array of alases to a 3prid');
-    let status = '#'+this.getStatusRoomLocalpart();
-    return room.getAliases().reduce((result, alias) => {
-      const localpart = alias.split(':')[0];
-      if (localpart == status) {
-        return 'status_room';
+  private getThirdPartyRoomIdFromMatrixRoomId(matrixRoomId) : Promise<string> {
+    // TODO: detect and handle status room
+    // idea: keep status room matrix id in a variable
+    for (let r in this.thirdPartyRooms) {
+      if (this.thirdPartyRooms[r] == matrixRoomId) {
+        return Promise.resolve(r);
       }
-      const matches = localpart.match(patt);
-      return matches ? matches[1] : result;
-    }, null);
+    }
+    return this.bridge.db.getAsync("SELECT remote FROM rooms WHERE mxid = $mxid", {
+      $mxid: matrixRoomId
+    }).then(r => {
+      if (!r || !r.remote) {
+        return null;
+      }
+      this.thirdPartyRooms[r.remote] = matrixRoomId;
+      return r.remote;
+    });
   }
   private getRoomAliasLocalPartFromThirdPartyRoomId(id) {
-    return this.network+"_puppet_"+this.identityPair.id+"_"+id;
+    return "_puppet_"+this.network+"_"+id;
   }
 
   /**
@@ -358,118 +358,67 @@ export class Base {
    * @param {string} userId The third party user ID
    * @param {string} name The third party user name
    * @param {string} avatarUrl The third party user avatar URL
-   * @param {matrixRoomData} optional room data to associate with this ghost (for e.g. room avatar changing along)
    *
    * @returns {Promise} A promise resolving to an Intent
    */
 
-  private getIntentFromThirdPartySenderId(userId: string, name?: string, avatarUrl?: string, matrixRoomData?: NewMatrixRoomData) : Promise<Intent> {
+  private getIntentFromThirdPartySenderId(userId: string, name?: string, avatarUrl?: string) : Promise<Intent> {
     const ghostUserId = this.getGhostUserFromThirdPartySenderId(userId);
     const ghostIntent = this.bridge.getIntent(ghostUserId);
-    const botClient = this.getIntentFromApplicationServerBot().getClient();
     // TODO: cache name & avatarUrl of ghost locally
 
     let promiseList = [];
     
-    if (matrixRoomData && matrixRoomData.matrixRoomId) {
-      if (matrixRoomData.createdNeedName) {
-        promiseList.push(ghostCache.associateName(ghostUserId, matrixRoomData.matrixRoomId));
-      }
-      if (matrixRoomData.createdNeedAvatar) {
-        promiseList.push(ghostCache.associateAvatarUrl(ghostUserId, matrixRoomData.matrixRoomId));
+    if (!(ghostUserId in this.thirdPartyGhosts)) {
+      this.thirdPartyGhosts[ghostUserId] = <GhostCacheInterface>{};
+      promiseList.push(this.bridge.db.getAsync("SELECT id FROM ghosts WHERE mxid = $mxid", {$mxid: ghostUserId}).then(g => {
+        if (g) {
+          return;
+        }
+        // create DB entry
+        return this.bridge.db.runAsync("INSERT INTO ghosts (mxid, nid, remote) VALUES ($mxid, $nid, $remote)", {
+          $mxid: ghostUserId,
+          $nid: this.network,
+          $remote: userId
+        });
+      }));
+    }
+    if (name) {
+      if (!this.thirdPartyGhosts[ghostUserId].name || this.thirdPartyGhosts[ghostUserId].name != name) {
+        promiseList.push(this.bridge.db.getAsync("SELECT name FROM ghosts WHERE mxid = $mxid", {$mxid: ghostUserId}).then(g => {
+          this.thirdPartyGhosts[ghostUserId].name = name;
+          if (g && g.name == name) {
+            return;
+          }
+          // update DB
+          return this.bridge.db.runAsync("UPDATE ghosts SET name = $name WHERE mxid = $mxid", {
+            $name: name,
+            $mxid: ghostUserId
+          })
+          // update display name
+          .then(ghostIntent.setDisplayName(name));
+        }));
       }
     }
     
-    let updatenamePromise = (should: boolean, _name: string) => {
-      if (should) {
-        info("Updating display name for", ghostUserId);
-        return ghostIntent.setDisplayName(_name).then(() => {
-          return ghostCache.updateName(ghostUserId, _name);
-        }).then(() => {
-          return ghostCache.getAssociatedNames(ghostUserId);
-        }).then((matrixRoomIds) => {
-          let namePromiseList = [];
-          matrixRoomIds.forEach((roomId) => {
-            namePromiseList.push(botClient.setRoomName(roomId, _name));
-          });
-          return Promise.all(namePromiseList);
-        });
-      } else if (matrixRoomData && matrixRoomData.matrixRoomId && matrixRoomData.createdNeedName) {
-        return botClient.setRoomName(matrixRoomData.matrixRoomId, _name);
-      }
-      return Promise.resolve();
-    };
-    if (name) {
-      promiseList.push(ghostCache.shouldUpdateName(ghostUserId, name).then((should) => {
-        return updatenamePromise(should, name);
-      }));
-    } else {
-      promiseList.push(ghostCache.hasName(ghostUserId).then((has) => {
-        if (has) {
-          return;
-        }
-        return this.getOrInitRemoteUserStoreDataFromThirdPartyUserId(userId).then((remoteUser)=>{
-          let _name = remoteUser.get('name');
-          return ghostCache.shouldUpdateName(ghostUserId, _name).then((should) => {
-            return updatenamePromise(should, _name);
-          })
-        });
-      }));
-    }
-
-    let updateavatarPromise = (should: boolean, _url: string) => {
-      if (should) {
-        info("Updating avatar for", ghostUserId);
-        let contentUri = '';
-        return this.setGhostAvatar(ghostIntent, _url).then((avatar_url) => {
-          if (!avatar_url) {
-            return Promise.reject(new Error("Couldn't upload avatar!"));
+    if (avatarUrl) {
+      if (!this.thirdPartyGhosts[ghostUserId].avatarUrl || this.thirdPartyGhosts[ghostUserId].avatarUrl != avatarUrl) {
+        promiseList.push(this.bridge.db.getAsync("SELECT avatar FROM ghosts WHERE mxid = $mxid", {$mxid: ghostUserId}).then(g => {
+          this.thirdPartyGhosts[ghostUserId].avatarUrl = avatarUrl;
+          if (g && g.avatar == avatarUrl) {
+            return;
           }
-          contentUri = avatar_url;
-          // TODO: set private room name avatars
-          return ghostCache.updateAvatarUrl(ghostUserId, _url);
-        }).then(() => {
-          return ghostCache.getAssociatedAvatarurls(ghostUserId);
-        }).then((matrixRoomIds) => {
-          let avatarPromiseList = [];
-          debug(contentUri);
-          matrixRoomIds.forEach((roomId) => {
-            avatarPromiseList.push(botClient.sendStateEvent(roomId, 'm.room.avatar', { url: contentUri }, ''));
-          });
-          return Promise.all(avatarPromiseList);
-        }).then(() => {
-          return; // make sure we are <Promise<void>>
-        });
-      } else if (matrixRoomData && matrixRoomData.matrixRoomId && matrixRoomData.createdNeedAvatar) {
-        return ghostIntent.getClient().getProfileInfo(ghostUserId, 'avatar_url').then(({avatar_url})=>{
-          if (avatar_url) {
-            return botClient.sendStateEvent(matrixRoomData.matrixRoomId, 'm.room.avatar', { url: avatar_url }, '');
-          }
-        });
-      }
-      return Promise.resolve();
-    }
-    if (avatarUrl) { // this.setGhostAvatar(ghostIntent, avatarUrl)
-      promiseList.push(ghostCache.shouldUpdateAvatarUrl(ghostUserId, avatarUrl).then((should) => {
-        return updateavatarPromise(should, avatarUrl);
-      }));
-    } else {
-      promiseList.push(ghostCache.hasAvatarUrl(ghostUserId).then((has) => {
-        if (has) {
-          return;
-        }
-        return this.getOrInitRemoteUserStoreDataFromThirdPartyUserId(userId).then((remoteUser)=>{
-          let _url = remoteUser.get('avatarUrl');
-          return ghostCache.shouldUpdateAvatarUrl(ghostUserId, _url).then((should) => {
-            if (!_url) {
-              return;
-            }
-            return updateavatarPromise(should, _url);
+          // update DB
+          return this.bridge.db.runAsync("UPDATE ghosts SET avatar = $avatar WHERE mxid = $mxid", {
+            $avatar: avatarUrl,
+            $mxid: ghostUserId
           })
-        });
-      }));
+          // update avatar
+          .then(this.setGhostAvatar(ghostIntent, avatarUrl));
+        }));
+      }
     }
-
+    
     return Promise.all(promiseList).then(() => {
       return ghostIntent;
     });
@@ -479,208 +428,116 @@ export class Base {
     return this.bridge.getIntent();
   }
 
-  /**
-   * Returns a Promise resolving {senderName}
-   *
-   * Optional code path which is only called if the adapter does not
-   * provide a senderName when invoking handleThirdPartyRoomMessage
-   *
-   * @param {string} thirdPartyUserId
-   * @returns {Promise} A promise resolving to a {RemoteUser}
-   */
-
-  private getOrInitRemoteUserStoreDataFromThirdPartyUserId(thirdPartyUserId: string) : Promise<RemoteUser> {
-    const userStore = this.bridge.getUserStore();
-    return userStore.getRemoteUser(thirdPartyUserId).then(rUser=>{
-      if ( rUser ) {
-        info("found existing remote user in store", rUser);
-        return rUser;
-      } else {
-        info("did not find existing remote user in store, we must create it now");
-        return this.adapter.getUserData(b2a(thirdPartyUserId)).then(thirdPartyUserData => {
-          info("got 3p user data:", thirdPartyUserData);
-          return new RemoteUser(thirdPartyUserId, thirdPartyUserData);
-        }).then(rUser => {
-          return userStore.setRemoteUser(rUser);
-        }).then(()=>{
-          return userStore.getRemoteUser(thirdPartyUserId);
-        }).then(rUser => {
-          return rUser;
-        });
-      }
-    });
-  }
-
-  private getOrCreateMatrixRoomFromThirdPartyRoomId(thirdPartyRoomId: string, force = false, ghostId?: string) : Promise<NewMatrixRoomData> {
+  private getOrCreateMatrixRoomFromThirdPartyRoomId(thirdPartyRoomId: string, force = false, ghostId?: string) : Promise<string> {
     if (!force && (thirdPartyRoomId in this.thirdPartyRooms)) {
-      return new Promise<NewMatrixRoomData>((resolve, reject) => {
-        resolve(<NewMatrixRoomData>{
-          matrixRoomId: this.thirdPartyRooms[thirdPartyRoomId],
-        });
-      })
+      return Promise.resolve(this.thirdPartyRooms[thirdPartyRoomId]);
     }
-    const roomAlias = this.getRoomAliasFromThirdPartyRoomId(thirdPartyRoomId);
-    const roomAliasName = this.getRoomAliasLocalPartFromThirdPartyRoomId(thirdPartyRoomId);
-    info('looking up', thirdPartyRoomId, '('+roomAlias+')');
-    const puppetClient = this.puppet.getClient();
-    const botIntent = this.getIntentFromApplicationServerBot();
-    const botClient = botIntent.getClient();
-    const puppetUserId = puppetClient.credentials.userId;
-    let ghostIntent: Intent = null;
-    if (ghostId) {
-      ghostId = this.getGhostUserFromThirdPartySenderId(ghostId)
-      ghostIntent = this.bridge.getIntent(ghostId);
-    }
-
-    const grantPuppetMaxPowerLevel = (room_id) => {
-      info("ensuring puppet user has full power over this room");
-      return botIntent.setPowerLevel(room_id, puppetUserId, 100).then(()=>{
-        info('granted puppet client admin status on the protocol status room');
-      }).catch((err)=>{
-        warn(err);
-        warn('ignoring failed attempt to give puppet client admin on the status room');
-      }).then(()=> {
-        return room_id;
-      });
-    };
-    
-    const makeDirect = (room_id, userId = "") => {
-      // taken from https://github.com/matrix-org/matrix-react-sdk/blob/a5aa497287ec9a8d7536f14657bbee9406ebc6fa/src/Rooms.js#L103
-      const mDirectEvent = puppetClient.getAccountData('m.direct');
-      let dmRoomMap = {};
-      
-      if (mDirectEvent !== undefined) {
-        dmRoomMap = mDirectEvent.getContent();
+    return this.bridge.db.getAsync("SELECT mxid FROM rooms WHERE nid = $nid AND remote = $remote", {
+      $nid: this.network,
+      $remote: thirdPartyRoomId
+    }).then((row) => {
+      if (row) {
+        this.thirdPartyRooms[thirdPartyRoomId] = row.mxid;
+        return Promise.resolve(row.mxid);
       }
       
-      // remove it from the lists of any others users
-      // (it can only be a DM room for one person)
-      for (const thisUserId of Object.keys(dmRoomMap)) {
-        const roomList = dmRoomMap[thisUserId];
+      const puppetClient = this.puppet.getClient();
+      const puppetUserId = puppetClient.credentials.userId;
+      let ghostIntent: Intent = null;
+      if (ghostId) {
+        ghostId = this.getGhostUserFromThirdPartySenderId(ghostId)
+        ghostIntent = this.bridge.getIntent(ghostId);
+      }
+      const makeDirect = (room_id, userId = "") => {
+        // taken from https://github.com/matrix-org/matrix-react-sdk/blob/a5aa497287ec9a8d7536f14657bbee9406ebc6fa/src/Rooms.js#L103
+        const mDirectEvent = puppetClient.getAccountData('m.direct');
+        let dmRoomMap = {};
+        
+        if (mDirectEvent !== undefined) {
+          dmRoomMap = mDirectEvent.getContent();
+        }
+        
+        // remove it from the lists of any others users
+        // (it can only be a DM room for one person)
+        for (const thisUserId of Object.keys(dmRoomMap)) {
+          const roomList = dmRoomMap[thisUserId];
 
-        if (thisUserId != userId) {
-          const indexOfRoom = roomList.indexOf(room_id);
-          if (indexOfRoom > -1) {
-            roomList.splice(indexOfRoom, 1);
+          if (thisUserId != userId) {
+            const indexOfRoom = roomList.indexOf(room_id);
+            if (indexOfRoom > -1) {
+              roomList.splice(indexOfRoom, 1);
+            }
           }
         }
-      }
+        
+        const roomList = dmRoomMap[userId] || [];
+        if (roomList.indexOf(room_id) == -1) {
+          roomList.push(room_id);
+        }
+        dmRoomMap[userId] = roomList;
+        
+        return puppetClient.setAccountData('m.direct', dmRoomMap).then(() => room_id);
+      };
       
-      const roomList = dmRoomMap[userId] || [];
-      if (roomList.indexOf(room_id) == -1) {
-        roomList.push(room_id);
-      }
-      dmRoomMap[userId] = roomList;
-      
-      return puppetClient.setAccountData('m.direct', dmRoomMap).then(() => room_id);
-    }
-    
-    let _createdNeedName = false;
-    let _createdNeedAvatar = false;
-    
-    return puppetClient.getRoomIdForAlias(roomAlias).then(({room_id}) => {
-      info("found matrix room via alias. room_id:", room_id);
-      return room_id;
-    }, (_err) => {
-      info("the room doesn't exist. we need to create it for the first time");
-      return Promise.resolve(this.adapter.getRoomData(b2a(thirdPartyRoomId))).then(thirdPartyRoomData => {
+      return this.adapter.getRoomData(b2a(thirdPartyRoomId)).then(thirdPartyRoomData => {
         info("got 3p room data", thirdPartyRoomData);
         const { name, topic, avatarUrl, isDirect } = thirdPartyRoomData;
-        info("creating room !!!!", ">>>>"+roomAliasName+"<<<<", name, topic);
-        if (!name) {
-          _createdNeedName = true;
-        }
-        if (!avatarUrl) {
-          _createdNeedAvatar = true;
-        }
-        // it seems we will run into M_EXCLUSIVE even with a ghost intent...
-        // we are forced to use the bot intent to create the room :(
-        // this would be fine is createAsClient was honored -- but it is not honored...
-        // we will force the bot to leave later
+        info("creating room !!!!", ">>>>"+name+"<<<<", name, topic);
         let inviteArray = [];
+        
         if (ghostIntent) {
           inviteArray.push(ghostId);
         }
-        inviteArray.push(puppetUserId);
-        
-        debug(inviteArray);
-        return botClient.createRoom({
-            name,
-            topic,
-            visibility: 'private',
-            invite: inviteArray
+        return puppetClient.createRoom({
+          name,
+          topic,
+          visibility: 'private',
+          invite: inviteArray
         }).then(({room_id}) => {
           info("room created", room_id);
           let promiseList = [];
-          promiseList.push(botIntent.createAlias(roomAlias, room_id));
           
+          // invite ghost if needed
           if (ghostIntent) {
             promiseList.push(ghostIntent.getClient().joinRoom(room_id));
-            promiseList.push(botClient.setPowerLevel(room_id, ghostId, 100).catch(err => {
+            promiseList.push(puppetClient.setPowerLevel(room_id, ghostId, 100).catch(err => {
               warn('Failed to make ghost an admin');
             }));
           }
           
-          promiseList.push(puppetClient.joinRoom(room_id));
-          promiseList.push(botClient.setPowerLevel(room_id, puppetUserId, 100).catch(err => {
-            warn('Failed to make ourself an admin');
+          // add avatar
+          if (avatarUrl) {
+            promiseList.push(this.setRoomAvatar(room_id, avatarUrl));
+          }
+          
+          // add room to database
+          promiseList.push(this.bridge.db.runAsync("INSERT INTO rooms (mxid, nid, remote, direct, name, topic, icon) VALUES ($mxid, $nid, $remote, $direct, $name, $topic, $icon)", {
+            $mxid: room_id,
+            $nid: this.network,
+            $remote: thirdPartyRoomId,
+            $direct: isDirect,
+            $name: name,
+            $topic: topic,
+            $icon: avatarUrl
           }));
           
-          if (avatarUrl) {
-            promiseList.push(this.setRoomAvatar(room_id, avatarUrl).then(()=>room_id));
+          // make direct
+          if (isDirect && ghostIntent) {
+            promiseList.push(makeDirect(room_id, ghostId));
           }
-
-          if (isDirect) {
-            if (ghostIntent) {
-              promiseList.push(makeDirect(room_id, ghostId));
-            } else {
-              promiseList.push(makeDirect(room_id, roomAlias));
-            }
-          }
-
           return Promise.all(promiseList).then(()=>room_id);
         });
       });
     }).then(matrixRoomId => {
-      // we still do this to verify if the puppet is in the room
-      // if the puppet isn't in the room then we need to abort it as we lost control over it
-      info("making puppet join room", matrixRoomId);
-      return puppetClient.joinRoom(matrixRoomId).then(()=>{
-        info("returning room id after join room attempt", matrixRoomId);
-        return matrixRoomId;
-      }, (err) => {
-        if ( err.message === 'No known servers' ) {
-          warn('we cannot use this room anymore because you cannot currently rejoin an empty room (synapse limitation? riot throws this error too). we need to de-alias it now so a new room gets created that we can actually use.');
-          return botClient.deleteAlias(roomAlias).then(()=>{
-            warn('deleted alias... trying again to get or create room.');
-            return this.getOrCreateMatrixRoomFromThirdPartyRoomId(thirdPartyRoomId, true).then(({ matrixRoomId, createdNeedName, createdNeedAvatar }) => {
-              _createdNeedName = createdNeedName;
-              _createdNeedAvatar = createdNeedAvatar;
-              return matrixRoomId;
-            });
-          });
-        } else {
-          warn("ignoring error from puppet join room: ", err.message);
-          return matrixRoomId;
-        }
-      });
-    }).then(matrixRoomId => {
-      // the naming scheme is significantly different, we would never collide so we might as well use the same map for both directions
-      this.thirdPartyRooms[matrixRoomId] = thirdPartyRoomId;
+      info("Done creating matrix room", matrixRoomId);
       this.thirdPartyRooms[thirdPartyRoomId] = matrixRoomId;
-      
-      return <NewMatrixRoomData>{
-        matrixRoomId,
-        createdNeedName: _createdNeedName,
-        createdNeedAvatar: _createdNeedAvatar,
-      };
+      return matrixRoomId;
     });
   }
 
   private roomGhostMap:Map<string, string[]> = new Map<string, string[]>();
   private inviteAndJoinMatrixRoom(ghostIntent, roomId: string, force = false): Promise<void> {
-    const botIntent = this.getIntentFromApplicationServerBot();
-    const botClient = botIntent.getClient();
+    const puppetClient = this.puppet.getClient();
     
     const ghostId = ghostIntent.getClient().credentials.userId;
     if (!force && (roomId in this.roomGhostMap) && this.roomGhostMap[roomId].indexOf(ghostId) !== -1) {
@@ -693,14 +550,14 @@ export class Base {
       }
       this.roomGhostMap[roomId].push(ghostId);
     }).then(() => {
-      return botClient.setPowerLevel(roomId, ghostId, 100).then(() => {
+      return puppetClient.setPowerLevel(roomId, ghostId, 100).then(() => {
         info('granted ghost max power level');
       }).catch((err) => {
         warn(err);
         warn('Ignorning granting ghost power');
       });
     });
-    return botClient.invite(roomId, ghostId).then(() => {
+    return puppetClient.invite(roomId, ghostId).then(() => {
       return joinPromise;
     }).catch(err => {
       if (err.name == 'M_FORBIDDEN') {
@@ -714,9 +571,8 @@ export class Base {
     const { text, senderId, senderName, avatarUrl, roomId } = params;
     const tag = autoTagger(senderId, this);
 
-
-    return this.getOrCreateMatrixRoomFromThirdPartyRoomId(roomId, force, senderId).then((matrixRoomData) => {
-      const { matrixRoomId, createdNeedName, createdNeedAvatar } = matrixRoomData;
+    return this.getOrCreateMatrixRoomFromThirdPartyRoomId(roomId, force, senderId).then((matrixRoomId) => {
+      
       if (senderId === undefined) {
         let handler : MessageHandler = { tag, matrixRoomId, client: this.puppet.client }
         if ( this.isTaggedMatrixMessage(text) ) {
@@ -724,7 +580,7 @@ export class Base {
         }
         return handler;
       }
-      return this.getIntentFromThirdPartySenderId(senderId, senderName, avatarUrl, matrixRoomData).then(ghostIntent=>{
+      return this.getIntentFromThirdPartySenderId(senderId, senderName, avatarUrl).then(ghostIntent=>{
         return this.getStatusRoomId().then((statusRoomId)=>{
           return ghostIntent.join(statusRoomId);
         }).then(()=>{
@@ -826,7 +682,6 @@ export class Base {
       }
     }
     payload.roomId = a2b(payload.roomId);
-    debug(payload);
     const {
       text, senderId, senderName, avatarUrl, roomId,
       html
@@ -868,60 +723,41 @@ export class Base {
   private handleMatrixMessageEvent(data) {
     const { room_id, sender, content: { body, msgtype } } = data;
 
-    let promise, msg;
-
     if (this.puppet.userId != sender || this.isTaggedMatrixMessage(body)) {
       info("ignoring tagged message, it was sent by the bridge");
       return;
     }
 
-    const thirdPartyRoomId = this.getThirdPartyRoomIdFromMatrixRoomId(room_id);
-    const isStatusRoom = thirdPartyRoomId === "status_room";
-    debug(thirdPartyRoomId);
-    if (!thirdPartyRoomId) {
-      promise = () => Promise.resolve(); // not our network prefix
-    } else if (isStatusRoom) {
-      info("ignoring incoming message to status room");
-
-      msg = this.tagMatrixMessage("Commands are currently ignored here");
-
-      // We may wish to process bang commands here at some point,
-      // but for now let's just send a message back
-      promise = () => this.sendStatusMsg({ fixedWidthOutput: false }, msg);
-
-    } else {
-      msg = this.tagMatrixMessage(body);
-
+    return this.getThirdPartyRoomIdFromMatrixRoomId(room_id).then(thirdPartyRoomId => {
+      if (!thirdPartyRoomId) {
+        // not our message, ignore it
+        return;
+      }
+      let msg = this.tagMatrixMessage(body);
       if (msgtype === 'm.text') {
         if (this.adapter.handleMatrixUserBangCommand) {
           const bc = parseBangCommand(body);
           if (bc) return this.adapter.handleMatrixUserBangCommand(bc, data);
         }
-        promise = () => this.adapter.sendMessage(b2a(thirdPartyRoomId), msg);
+        return this.adapter.sendMessage(b2a(thirdPartyRoomId), msg);
       } else if (msgtype === 'm.image') {
         info("picture message from riot");
 
         let url = this.puppet.getClient().mxcUrlToHttp(data.content.url);
-        promise = () => {
-          const image : Image = {
-            url, text: this.tagMatrixMessage(body),
-            mimetype: data.content.info.mimetype,
-            width: data.content.info.w,
-            height: data.content.info.h,
-            size: data.content.info.size,
-          }
-          return this.adapter.sendImageMessage(b2a(thirdPartyRoomId), image);
-        };
+        const image : Image = {
+          url, text: this.tagMatrixMessage(body),
+          mimetype: data.content.info.mimetype,
+          width: data.content.info.w,
+          height: data.content.info.h,
+          size: data.content.info.size,
+        }
+        return this.adapter.sendImageMessage(b2a(thirdPartyRoomId), image);
       } else if (msgtype === 'm.emote') {
-        promise = () => this.adapter.sendEmoteMessage(b2a(thirdPartyRoomId), msg);
+        return this.adapter.sendEmoteMessage(b2a(thirdPartyRoomId), msg);
       } else {
         let err = 'dont know how to handle this msgtype '+msgtype;
-        promise = () => Promise.reject(new Error(err));
+        return Promise.reject(new Error(err));
       }
-    }
-
-    return promise().catch(err=>{
-      this.sendStatusMsg({}, err, data);
     });
   }
   

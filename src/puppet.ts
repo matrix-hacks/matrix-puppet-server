@@ -2,14 +2,13 @@ const Promise = require('bluebird');
 const matrixSdk = require("matrix-js-sdk");
 
 import { MatrixClient } from './matrix-client';
-import { IdentityPair } from './identity-pair';
 import { Homeserver, User } from './config';
 import { associateToken, TokenAssociationParams } from './associate-token';
 import { Bridge } from 'matrix-appservice-bridge';
 import { Base } from './base'
 
 interface PuppetIdentity extends User {
-  localpart: string;
+  mxid: string;
 }
 
 /**
@@ -28,10 +27,10 @@ export class Puppet {
   /**
    * Constructs a Puppet
    */
-  constructor(localpart: string, user: User, homeserver: Homeserver) {
+  constructor(mxid: string, user: User, homeserver: Homeserver) {
     this.identity = <PuppetIdentity>{
       ...user,
-      localpart
+      mxid
     };
     this.homeserver = homeserver;
     this.bases = [];
@@ -46,7 +45,7 @@ export class Puppet {
 
     // load identity
     if ( this.identity ) {
-      this.userId = "@"+this.identity.localpart+":"+this.homeserver.domain;
+      this.userId = this.identity.mxid;
     } else {
       console.error('Invalid matrix identity specified');
       process.exit(1);
@@ -61,7 +60,7 @@ export class Puppet {
       return matrixClient.loginWithPassword(this.userId, this.identity.password).then(accessDat => {
         if (jsonFile) {
           return associateToken(<TokenAssociationParams>{
-            localpart: this.identity.localpart,
+            mxid: this.identity.mxid,
             jsonFile,
             token: accessDat.access_token
           }).then(()=>{
@@ -72,7 +71,7 @@ export class Puppet {
         }
       });
     } else {
-      console.error(`Matrix puppet '${this.identity.localpart}' must have a 'token' or 'password' to login`);
+      console.error(`Matrix puppet '${this.identity.mxid}' must have a 'token' or 'password' to login`);
       process.exit(1);
     }
   }
@@ -137,11 +136,11 @@ export class Puppet {
    */
   public addAdapter(
     adapterClass: any,
-    ident: IdentityPair,
-    network: string,
+    nid: number,
+    config: any,
     bridge: Bridge
   ) {
-    let base = new Base(ident, network, this, bridge, adapterClass);
+    let base = new Base(config, nid, this, bridge, adapterClass);
     this.bases.push(base);
   }
 
